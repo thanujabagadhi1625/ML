@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LeetCode Mentor Sync</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>LeetCode Mentor</h1>
+      <div id="storedInfo" class="info-card">
+        <div class="info-label">Stored History</div>
+        <div id="storedCount" class="info-value">Loading...</div>
+        <div id="lastSync" class="info-sub">Last sync: Checking...</div>
+      </div>
+
+      <div class="input-group">
+        <label for="maxItems">History Fetch Limit:</label>
+        <select id="maxItems">
+          <option value="100">100</option>
+          <option value="500">500</option>
+          <option value="1000" selected>1000</option>
+          <option value="2000">2000</option>
+        </select>
+      </div>
+
+      <div class="button-group">
+        <button id="syncNewBtn" class="btn primary">Sync New</button>
+        <button id="rebuildBtn" class="btn secondary">Rebuild History</button>
+      </div>
+
+      <div id="status" class="status">Ready.</div>
+      <div id="progress" class="progress"></div>
+      <div id="details" class="details"></div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

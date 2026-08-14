@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "LeetCode Mentor Sync",
+  "version": "0.1.0",
+  "description": "Sync LeetCode submission history from the browser to the local LeetCode Mentor app.",
+  "permissions": ["scripting", "activeTab", "storage"],
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "https://*.leetcode.com/*",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "LeetCode Mentor Sync"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.com/*", "https://*.leetcode.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
+

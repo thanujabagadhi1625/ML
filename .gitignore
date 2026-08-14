@@ -1,0 +1,106 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Local User Data & Submission History (Sensitive / Private)
+sync_store.json
+files/sync_store.json
+**/sync_store.json
+sync_store_backup_*.json
+files/sync_store_backup_*.json
+**/sync_store_backup_*.json
+mentor_report.json
+files/mentor_report.json
+**/mentor_report.json
+leetcode_history*.json
+files/leetcode_history*.json
+**/leetcode_history*.json
+!files/demo/**
+!demo/**
+
+# Streamlit Local Secrets & Cache
+.streamlit/secrets.toml
+files/.streamlit/secrets.toml
+**/secrets.toml
+
+# IDE & Editor Metadata
+.vscode/
+files/.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Testing & Linting Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# OS-Specific Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Logs & Temporary Artifacts
+*.log
+logs/
+temp/
+tmp/
+debug/
+scratch/
+artifacts/
+outputs/
+*.zip
+*.tar.gz
+*.rar
+idk/
+
+# Antigravity & AI Agent Artifacts
+.gemini/
