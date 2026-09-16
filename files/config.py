@@ -6,7 +6,20 @@ Centralizing config avoids magic numbers scattered across modules and
 makes the system easy to re-tune for a real LeetCode data dump later.
 """
 
+from pathlib import Path
 import numpy as np
+
+# --------------------------------------------------------------------------
+# Paths & Artifact Locations
+# --------------------------------------------------------------------------
+ROOT_DIR = Path(__file__).resolve().parent.parent
+FILES_DIR = Path(__file__).resolve().parent
+MODELS_DIR = ROOT_DIR / "models"
+CANONICAL_QUESTIONS_PATH = MODELS_DIR / "canonical_questions.json"
+RATING_MODEL_PATH = MODELS_DIR / "rating_model.pkl"
+ALS_MODEL_PATH = MODELS_DIR / "als_model.npz"
+QUESTION_EMBEDDINGS_PATH = MODELS_DIR / "question_embeddings.npy"
+MODEL_METADATA_PATH = MODELS_DIR / "model_metadata.json"
 
 # --------------------------------------------------------------------------
 # Reproducibility
@@ -15,11 +28,23 @@ RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
 # --------------------------------------------------------------------------
-# Synthetic Data Generation (DATA ENGINE)
+# Synthetic Data Generation & Archetypes (DATA ENGINE)
 # --------------------------------------------------------------------------
-NUM_USERS = 500
-NUM_QUESTIONS = 300
-NUM_SUBMISSIONS = 25_000
+NUM_USERS = 600
+NUM_QUESTIONS = 453
+NUM_SUBMISSIONS = 30_000
+
+USER_ARCHETYPES = [
+    "strong_overall",
+    "weak_dp",
+    "weak_graph",
+    "strong_easy_med_weak_hard",
+    "improving",
+    "declining",
+    "stable",
+    "high_attempt_low_accuracy",
+    "specialized",
+]
 
 DIFFICULTIES = ["Easy", "Medium", "Hard"]
 DIFFICULTY_WEIGHTS = [0.35, 0.45, 0.20]
@@ -37,11 +62,23 @@ STATUS_BASE_WEIGHTS = np.array([0.45, 0.30, 0.12, 0.09, 0.04])
 
 LANGUAGES = ["Python3", "C++", "Java", "JavaScript", "Go"]
 
+QUESTION_COLUMNS = ["question_id", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
+USER_COLUMNS = ["user_id", "account_age_days", "latent_skill", "contest_rating"]
+SUBMISSION_COLUMNS = ["user_id", "question_id", "timestamp", "status", "runtime_ms", "language"]
+
 # --------------------------------------------------------------------------
 # Feature Engineering (DATA ENGINE)
 # --------------------------------------------------------------------------
 RECENCY_HALF_LIFE_DAYS = 21.0   # controls exponential time-decay for momentum
 DATASET_WINDOW_DAYS = 365       # submissions span the last N days
+
+# --------------------------------------------------------------------------
+# Data Splitting (User-Level & Temporal)
+# --------------------------------------------------------------------------
+TRAIN_USER_RATIO = 0.70
+VAL_USER_RATIO = 0.15
+TEST_USER_RATIO = 0.15
+TEMPORAL_HISTORY_RATIO = 0.80   # first 80% interactions as input, last 20% held-out ground truth
 
 # --------------------------------------------------------------------------
 # NLP / Clustering Engine (WEAK TOPICS ENGINE)
@@ -61,15 +98,18 @@ MF_REG_LAMBDA = 20.0            # ALS regularization (lambda * I)
 MF_CONFIDENCE_ALPHA = 15.0      # implicit-feedback confidence scaling
 MF_EPOCHS = 15
 TOP_N_RECOMMENDATIONS = 5
-HYBRID_CF_WEIGHT = 0.7          # blend weight: CF score vs content-similarity score
-HYBRID_CONTENT_WEIGHT = 0.3
+
+# Recommendation score blending weights (tuned on validation users)
+HYBRID_CF_WEIGHT = 0.50          # collaborative filtering weight
+HYBRID_CONTENT_WEIGHT = 0.30     # content similarity weight
+HYBRID_WEAKNESS_WEIGHT = 0.20    # topic weakness boost weight
 
 # --------------------------------------------------------------------------
 # Prediction Engine (contest rating regression)
 # --------------------------------------------------------------------------
 XGB_PARAMS = {
     "n_estimators": 400,
-    "max_depth": 6,
+    "max_depth": 5,
     "learning_rate": 0.03,
     "subsample": 0.85,
     "colsample_bytree": 0.85,
@@ -80,10 +120,9 @@ XGB_PARAMS = {
     "n_jobs": -1,
 }
 XGB_PARAM_GRID = {
-    "model__n_estimators": [200, 400, 600],
-    "model__max_depth": [4, 6, 8],
-    "model__learning_rate": [0.01, 0.03, 0.1],
-    "model__subsample": [0.7, 0.85, 1.0],
+    "model__n_estimators": [200, 400],
+    "model__max_depth": [4, 6],
+    "model__learning_rate": [0.03, 0.08],
 }
-TEST_SIZE = 0.2
+TEST_SIZE = 0.15
 CV_FOLDS = 5

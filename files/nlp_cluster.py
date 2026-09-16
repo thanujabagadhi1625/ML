@@ -4,17 +4,15 @@ nlp_cluster.py
 WEAK TOPICS ENGINE
 
 Pipeline:
-  1. Take a user's FAILED submissions (Wrong Answer / TLE / Runtime / Compile Error).
+  1. Ingest a user's FAILED submissions (Wrong Answer / TLE / Runtime / Compile Error).
   2. Embed each problem's description with sentence-transformers (all-MiniLM-L6-v2).
   3. Cluster the embeddings with K-Means, auto-selecting k via silhouette score.
-  4. Label each cluster with representative keywords using class-based TF-IDF
-     (c-TF-IDF) so clusters read as human-interpretable "weak sub-topics"
-     rather than opaque cluster IDs -- e.g. "graph traversal + backtracking"
-     instead of "Cluster 3".
+  4. Label each cluster with representative keywords using canonical class-based TF-IDF
+     (c-TF-IDF, Grootendorst 2022) so clusters read as human-interpretable "weak sub-topics"
+     rather than opaque cluster IDs.
 
-This deliberately avoids hand-written keyword-matching / if-else topic
-classification: the topic groupings emerge purely from embedding geometry,
-so it generalizes to problem phrasings never seen before.
+The topic groupings emerge from embedding geometry, and cluster labels provide
+human-interpretable semantic keywords.
 """
 
 from __future__ import annotations
@@ -25,17 +23,97 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import silhouette_score
 
 import config
 
 
+# ==============================================================================
+# Canonical Class-based TF-IDF (c-TF-IDF)
+# ==============================================================================
+
+def compute_ctfidf(
+    documents_per_cluster: Dict[int, List[str]],
+    top_n: int = config.TOP_KEYWORDS_PER_CLUSTER,
+) -> Dict[int, List[str]]:
+    """
+    Canonical class-based TF-IDF (c-TF-IDF) formulation (Grootendorst, 2022).
+
+    Given K clusters, we treat each cluster c as a distinct class by concatenating
+    all problem descriptions in cluster c into a single class document.
+
+    Mathematical Formulation:
+        W_{t, c} = (tf_{t, c} / w_c) * ln(1 + A / tf_t)
+    where:
+        - tf_{t, c} is the frequency of term t in class/cluster c
+        - w_c = sum_t tf_{t, c} is the total number of words in class/cluster c
+        - A = (1 / K) * sum_c w_c is the average number of words per class
+        - tf_t = sum_c tf_{t, c} is the total frequency of term t across all classes
+
+    For each class c, terms with highest W_{t, c} are selected as representative keywords.
+    """
+    clusters = sorted(list(documents_per_cluster.keys()))
+    if not clusters:
+        return {}
+
+    class_docs = []
+    for c in clusters:
+        texts = [str(t).strip() for t in documents_per_cluster[c] if str(t).strip()]
+        class_docs.append(" ".join(texts) if texts else "general problem")
+
+    vectorizer = CountVectorizer(stop_words="english", max_features=500, min_df=1)
+    try:
+        count_matrix = vectorizer.fit_transform(class_docs)
+    except ValueError:
+        # Vocabulary empty (e.g. empty inputs or only English stop words)
+        return {c: ["General"] for c in clusters}
+
+    vocab = np.array(vectorizer.get_feature_names_out())
+    if len(vocab) == 0:
+        return {c: ["General"] for c in clusters}
+
+    # C is (K, V) raw count matrix
+    C = count_matrix.toarray().astype(float)
+    K, V = C.shape
+
+    # w_c: total words per class (shape: K, 1)
+    w_c = C.sum(axis=1, keepdims=True)
+    # Average words per class across all clusters
+    A = float(w_c.mean()) if K > 0 else 1.0
+
+    # tf_t: total frequency of word across all classes (shape: 1, V)
+    tf_t = C.sum(axis=0, keepdims=True)
+
+    # Class-based term frequency: tf_{t, c} / w_c
+    tf_norm = np.divide(C, np.maximum(w_c, 1e-9))
+
+    # Inverse class frequency: ln(1 + A / tf_t)
+    icf = np.log(1.0 + np.divide(A, np.maximum(tf_t, 1e-9)))
+
+    # Canonical c-TF-IDF matrix (K, V)
+    W = tf_norm * icf
+
+    cluster_keywords: Dict[int, List[str]] = {}
+    for row_idx, c_id in enumerate(clusters):
+        row_scores = W[row_idx]
+        if np.all(row_scores <= 0.0):
+            cluster_keywords[c_id] = ["General"]
+            continue
+        top_indices = np.argsort(row_scores)[::-1][:top_n]
+        valid_indices = [idx for idx in top_indices if row_scores[idx] > 0]
+        if valid_indices:
+            cluster_keywords[c_id] = vocab[valid_indices].tolist()
+        else:
+            cluster_keywords[c_id] = ["General"]
+
+    return cluster_keywords
+
+
 class WeakTopicAnalyzer:
     """
-    Encapsulates the embedding model + clustering logic so it is loaded once
-    and reused across users (loading a transformer per call would dominate
-    runtime).
+    Encapsulates the sentence-transformers embedding model, K-Means clustering,
+    and canonical c-TF-IDF keyword extraction with robust edge-case degradation.
     """
 
     def __init__(self, model_name: str = config.SENTENCE_TRANSFORMER_MODEL):
@@ -44,29 +122,34 @@ class WeakTopicAnalyzer:
 
     @property
     def model(self) -> SentenceTransformer:
-        # Lazy-load: the transformer is only pulled into memory the first time
-        # it's actually needed, keeping cold-start / unit-test time low.
         if self._model is None:
             self._model = SentenceTransformer(self.model_name)
         return self._model
 
+    def compute_ctfidf(self, texts: List[str], labels: List[int], top_n: int = 6) -> Dict[int, List[str]]:
+        """Convenience wrapper around canonical c-TF-IDF calculation."""
+        docs_per_cluster: Dict[int, List[str]] = {}
+        for text, label in zip(texts, labels):
+            docs_per_cluster.setdefault(label, []).append(text)
+        return compute_ctfidf(docs_per_cluster, top_n=top_n)
+
     # ---- Step 1: Embedding ----------------------------------------------------
     def embed_descriptions(self, descriptions: List[str]) -> np.ndarray:
-        """Batch-encodes descriptions into dense embeddings. Fully vectorized
-        (single batched forward pass), never one string at a time."""
+        """Batch-encodes descriptions into dense embeddings with unit norm."""
+        cleaned = [d.strip() if d and d.strip() else "algorithmic problem statement" for d in descriptions]
         embeddings = self.model.encode(
-            descriptions,
+            cleaned,
             batch_size=64,
             show_progress_bar=False,
-            normalize_embeddings=True,  # unit-norm -> cosine similarity == dot product
+            normalize_embeddings=True,
         )
         return np.asarray(embeddings)
 
     # ---- Step 2: Optimal k selection -------------------------------------------
     def _select_optimal_k(self, embeddings: np.ndarray) -> int:
         """
-        Sweeps k in [MIN_CLUSTERS, MAX_CLUSTERS] and picks the k maximizing
-        silhouette score. Gracefully handles low sample size or duplicate embeddings.
+        Sweeps k in [MIN_CLUSTERS, MAX_CLUSTERS] maximizing silhouette score.
+        Gracefully handles small sample size, duplicate embeddings, or single-region clusters.
         """
         n_samples = embeddings.shape[0]
         if n_samples < 3:
@@ -98,22 +181,31 @@ class WeakTopicAnalyzer:
 
     # ---- Step 3: Clustering -----------------------------------------------------
     def cluster_embeddings(self, embeddings: np.ndarray, n_clusters: int | None = None) -> np.ndarray:
+        """Clusters failure embeddings into optimal k semantic groups."""
         k = n_clusters or self._select_optimal_k(embeddings)
         if k <= 1:
             return np.zeros(embeddings.shape[0], dtype=int)
         kmeans = KMeans(n_clusters=k, random_state=config.RANDOM_SEED, n_init=10)
         return kmeans.fit_predict(embeddings)
 
-    # ---- Step 4: cluster labeling ------------------------------------------------
+    # ---- Step 4: Cluster Labeling via Canonical c-TF-IDF & Topic Tags -----------
     @staticmethod
     def _label_clusters_with_tags(failed_submissions_df: pd.DataFrame, cluster_labels: np.ndarray) -> Dict[int, List[str]]:
         """
-        Prefer actual problem tags over raw text keywords when we have them.
-        Guarantees that every cluster ID has a non-empty key in the returned dictionary.
+        Extracts human-interpretable keywords for each cluster using canonical c-TF-IDF,
+        supplemented with empirical topic tags from problem metadata.
         """
         unique_clusters = sorted(list(set(cluster_labels)))
-        labels: Dict[int, List[str]] = {}
 
+        # Group descriptions by cluster for c-TF-IDF
+        descriptions_per_cluster: Dict[int, List[str]] = {int(c): [] for c in unique_clusters}
+        for desc, c_id in zip(failed_submissions_df["description"].fillna(""), cluster_labels):
+            descriptions_per_cluster[int(c_id)].append(str(desc))
+
+        ctfidf_keywords = compute_ctfidf(descriptions_per_cluster, top_n=config.TOP_KEYWORDS_PER_CLUSTER)
+
+        # Count empirical problem tags in cluster
+        labels: Dict[int, List[str]] = {}
         rows = failed_submissions_df[["topic_tags"]].copy()
         rows["cluster"] = cluster_labels
         rows = rows.explode("topic_tags").dropna(subset=["topic_tags"])
@@ -137,51 +229,28 @@ class WeakTopicAnalyzer:
                 if c_tags:
                     labels[int(c_id)] = c_tags
 
-        descriptions = failed_submissions_df["description"].fillna("").tolist()
-        fallback_labels = WeakTopicAnalyzer._label_clusters_with_ctfidf(descriptions, cluster_labels)
+        # Combine topic tags and canonical c-TF-IDF keywords
+        final_labels: Dict[int, List[str]] = {}
         for c_id in unique_clusters:
-            if int(c_id) not in labels or not labels[int(c_id)]:
-                labels[int(c_id)] = fallback_labels.get(int(c_id), ["General"])
+            c_int = int(c_id)
+            tag_list = labels.get(c_int, [])
+            ctfidf_list = ctfidf_keywords.get(c_int, [])
 
-        return labels
+            combined = []
+            for item in tag_list + ctfidf_list:
+                item_clean = item.strip().title()
+                if item_clean and item_clean not in combined:
+                    combined.append(item_clean)
 
-    @staticmethod
-    def _label_clusters_with_ctfidf(descriptions: List[str], cluster_labels: np.ndarray) -> Dict[int, List[str]]:
-        """
-        Fallback for exported data that does not provide meaningful topic tags.
-        """
-        df = pd.DataFrame({"text": descriptions, "cluster": cluster_labels})
-        cluster_docs = df.groupby("cluster")["text"].apply(lambda texts: " ".join(texts))
+            final_labels[c_int] = combined[:config.TOP_KEYWORDS_PER_CLUSTER] if combined else ["General"]
 
-        vectorizer = TfidfVectorizer(stop_words="english", max_features=500)
-        try:
-            tfidf_matrix = vectorizer.fit_transform(cluster_docs.values)
-            vocab = np.array(vectorizer.get_feature_names_out())
+        return final_labels
 
-            labels = {}
-            for row_idx, cluster_id in enumerate(cluster_docs.index):
-                row = tfidf_matrix[row_idx].toarray().ravel()
-                if len(vocab) > 0:
-                    top_indices = np.argsort(row)[::-1][: config.TOP_KEYWORDS_PER_CLUSTER]
-                    labels[int(cluster_id)] = vocab[top_indices].tolist()
-                else:
-                    labels[int(cluster_id)] = ["General"]
-            return labels
-        except Exception:
-            return {int(c): ["General"] for c in cluster_docs.index}
-
-    # ---- Full pipeline for a single user -----------------------------------------
+    # ---- Full Pipeline for a Single User ----------------------------------------
     def analyze_user_weak_topics(self, failed_submissions_df: pd.DataFrame) -> Dict:
         """
-        Parameters
-        ----------
-        failed_submissions_df : DataFrame with at least a `description` column
-
-        Returns
-        -------
-        dict with:
-          - "clusters": list of {cluster_id, size, keywords, sample_titles}
-          - "n_failed_submissions": int
+        Main entry point for single-user failure analysis.
+        Handles zero-failure, low-failure, duplicate, and single-cluster edge cases gracefully.
         """
         n_failed = len(failed_submissions_df)
         if n_failed == 0:
@@ -191,7 +260,7 @@ class WeakTopicAnalyzer:
                 "note": "No failed submissions found. Excellent accuracy!",
             }
 
-        def _structured_topic_fallback(note_str: str) -> Dict:
+        def _structured_fallback(note_str: str) -> Dict:
             if "topic_tags" not in failed_submissions_df.columns:
                 sample_titles = failed_submissions_df["title"].head(3).tolist() if "title" in failed_submissions_df.columns else []
                 return {
@@ -230,16 +299,31 @@ class WeakTopicAnalyzer:
                 "note": note_str,
             }
 
+        # Guard against insufficient samples for meaningful embedding clustering
         if n_failed < config.MIN_FAILED_SUBMISSIONS_FOR_CLUSTERING:
-            return _structured_topic_fallback("Fewer than 5 failed submissions; using structured topic analysis instead.")
+            return _structured_fallback(
+                f"Fewer than {config.MIN_FAILED_SUBMISSIONS_FOR_CLUSTERING} failed submissions; using structured topic analysis instead."
+            )
 
         try:
-            descriptions = failed_submissions_df["description"].tolist()
+            descriptions = failed_submissions_df["description"].fillna("").tolist()
             embeddings = self.embed_descriptions(descriptions)
             cluster_labels = self.cluster_embeddings(embeddings)
 
+            # If all failures fall into a single semantic region
             if len(set(cluster_labels)) < 2:
-                return _structured_topic_fallback("NLP clustering yielded 1 cluster; using structured topic analysis instead.")
+                keyword_map = self._label_clusters_with_tags(failed_submissions_df, cluster_labels)
+                sample_titles = failed_submissions_df["title"].head(3).tolist() if "title" in failed_submissions_df.columns else []
+                return {
+                    "clusters": [{
+                        "cluster_id": 0,
+                        "size": n_failed,
+                        "keywords": keyword_map.get(0, ["General"]),
+                        "sample_titles": sample_titles,
+                    }],
+                    "n_failed_submissions": n_failed,
+                    "note": "All failure embeddings belong to a single coherent semantic cluster.",
+                }
 
             keyword_map = self._label_clusters_with_tags(failed_submissions_df, cluster_labels)
             working = failed_submissions_df.assign(cluster=cluster_labels)
@@ -249,13 +333,13 @@ class WeakTopicAnalyzer:
                     "cluster_id": int(cluster_id),
                     "size": int(len(group)),
                     "keywords": keyword_map.get(int(cluster_id), ["General"]),
-                    "sample_titles": group["title"].head(3).tolist(),
+                    "sample_titles": group["title"].head(3).tolist() if "title" in group.columns else [],
                 })
 
             clusters_summary.sort(key=lambda c: c["size"], reverse=True)
             return {"clusters": clusters_summary, "n_failed_submissions": n_failed}
         except Exception as e:
-            return _structured_topic_fallback(f"NLP clustering unavailable due to data variance ({e}); using structured topic analysis.")
+            return _structured_fallback(f"NLP clustering degraded gracefully ({e}); using structured topic analysis.")
 
 
 if __name__ == "__main__":

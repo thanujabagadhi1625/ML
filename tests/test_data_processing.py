@@ -94,6 +94,55 @@ class TestDataProcessing(unittest.TestCase):
             self.assertIn("weakness_level", profile.columns)
             self.assertIn("risk_score", profile.columns)
 
+    def test_user_archetypes_generation(self):
+        """Verify synthetic generation with 9 archetypes produces expected distributions."""
+        users_df, latent_df = generate_synthetic_users(n=90, return_latent_info=True)
+        self.assertEqual(len(users_df), 90)
+        self.assertIn("archetype", latent_df.columns)
+        unique_archetypes = latent_df["archetype"].unique()
+        self.assertGreaterEqual(len(unique_archetypes), 5)
+
+    def test_user_level_splitting_no_leakage(self):
+        """Verify user_train_val_test_split has strictly zero user overlap across splits."""
+        from data_processing import user_train_val_test_split
+        users_df, questions_df, submissions_df = generate_full_synthetic_dataset()
+
+        train_u, val_u, test_u, train_s, val_s, test_s = user_train_val_test_split(
+            users_df, submissions_df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15
+        )
+
+        train_set = set(train_u["user_id"])
+        val_set = set(val_u["user_id"])
+        test_set = set(test_u["user_id"])
+
+        self.assertEqual(len(train_set.intersection(val_set)), 0)
+        self.assertEqual(len(train_set.intersection(test_set)), 0)
+        self.assertEqual(len(val_set.intersection(test_set)), 0)
+
+        # Verify submission user IDs strictly match their user split
+        self.assertTrue(set(train_s["user_id"]).issubset(train_set))
+        self.assertTrue(set(val_s["user_id"]).issubset(val_set))
+        self.assertTrue(set(test_s["user_id"]).issubset(test_set))
+
+    def test_temporal_splitting_no_future_leakage(self):
+        """Verify temporal_split_user_submissions partitions chronologically without future leakage."""
+        from data_processing import temporal_split_user_submissions
+        users_df, questions_df, submissions_df = generate_full_synthetic_dataset()
+
+        sample_uid = int(users_df["user_id"].iloc[0])
+        user_subs = submissions_df[submissions_df["user_id"] == sample_uid].copy()
+
+        if len(user_subs) >= 5:
+            hist_df, holdout_df = temporal_split_user_submissions(user_subs, history_ratio=0.8)
+            self.assertGreater(len(hist_df), 0)
+            self.assertGreater(len(holdout_df), 0)
+            self.assertEqual(len(hist_df) + len(holdout_df), len(user_subs))
+
+            # Max timestamp in history must be <= min timestamp in holdout
+            max_hist_time = pd.to_datetime(hist_df["timestamp"]).max()
+            min_holdout_time = pd.to_datetime(holdout_df["timestamp"]).min()
+            self.assertLessEqual(max_hist_time, min_holdout_time)
+
 
 if __name__ == "__main__":
     unittest.main()

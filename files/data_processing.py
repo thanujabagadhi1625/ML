@@ -4,9 +4,9 @@ data_processing.py
 DATA ENGINE
 
 Responsibilities:
-  1. Generate a realistic, internally-consistent synthetic dataset
-     (questions, users, submissions) that mirrors a real LeetCode data
-     export -- this is the drop-in replacement point for a real scrape/API dump.
+   1. Generate a realistic, internally-consistent synthetic dataset
+      (questions, users, submissions) that mirrors a real LeetCode data
+      export -- this is the drop-in replacement point for a real user export or synced submission log.
   2. Run a fully-vectorized feature engineering pipeline that turns raw
      submission logs into a per-user feature matrix consumed by:
        - nlp_cluster.py   (needs raw failed-submission descriptions)
@@ -51,42 +51,49 @@ _GOALS = ["the maximum subarray sum", "whether a valid path exists", "the shorte
           "the k-th largest element", "a valid topological ordering", "the minimum edit distance"]
 
 
-def _rng() -> np.random.Generator:
-    return np.random.default_rng(config.RANDOM_SEED)
+def _rng(seed: int | None = None) -> np.random.Generator:
+    return np.random.default_rng(config.RANDOM_SEED if seed is None else seed)
 
 
-def generate_synthetic_questions(n: int = config.NUM_QUESTIONS) -> pd.DataFrame:
+def load_canonical_questions(n: int | None = None) -> pd.DataFrame:
     """
-    Builds a synthetic `questions` table.
-
-    Each question gets 1-3 topic tags and a template-generated description
-    that textually references its tags -- this keeps the NLP embeddings in
-    nlp_cluster.py semantically meaningful (tag words actually appear in
-    the text sentence-transformers will embed).
+    Loads canonical questions from models/canonical_questions.json.
+    Falls back to generating if missing.
     """
+    path = config.CANONICAL_QUESTIONS_PATH
+    if path.exists():
+        try:
+            records = json.loads(path.read_text(encoding="utf-8"))
+            df = pd.DataFrame(records)
+            if n is not None and n < len(df):
+                df = df.head(n)
+            return df[QUESTION_COLUMNS]
+        except Exception:
+            pass
+    # Fallback to template generation if canonical catalogue is unavailable
+    return _generate_template_synthetic_questions(n or config.NUM_QUESTIONS)
+
+
+def _generate_template_synthetic_questions(n: int = config.NUM_QUESTIONS) -> pd.DataFrame:
     rng = _rng()
     difficulties = rng.choice(config.DIFFICULTIES, size=n, p=config.DIFFICULTY_WEIGHTS)
-
     tags_per_question = rng.integers(1, 4, size=n)
     topic_tags_col = [
         list(rng.choice(config.TOPIC_TAGS, size=k, replace=False))
         for k in tags_per_question
     ]
-
     templates = rng.choice(_DESCRIPTION_TEMPLATES, size=n)
     subjects = rng.choice(_SUBJECTS, size=n)
     goals = rng.choice(_GOALS, size=n)
-
     descriptions = [
-        templates[i].format(a=subjects[i], b=goals[i], c=", ".join(topic_tags_col[i]),
-                             d=difficulties[i].lower() + "-tier time/space")
+        templates[i].format(
+            a=subjects[i], b=goals[i], c=", ".join(topic_tags_col[i]),
+            d=difficulties[i].lower() + "-tier constraints"
+        )
         for i in range(n)
     ]
-
-    # Acceptance rate is inversely related to difficulty (vectorized, not per-row branching).
     difficulty_penalty = pd.Series(difficulties).map(config.DIFFICULTY_SCORE).to_numpy()
     acceptance_rate = np.clip(0.75 - 0.12 * difficulty_penalty + rng.normal(0, 0.05, n), 0.05, 0.95)
-
     df = pd.DataFrame({
         "question_id": np.arange(1, n + 1),
         "title": [f"Problem {i}" for i in range(1, n + 1)],
@@ -98,86 +105,284 @@ def generate_synthetic_questions(n: int = config.NUM_QUESTIONS) -> pd.DataFrame:
     return df[QUESTION_COLUMNS]
 
 
-def generate_synthetic_users(n: int = config.NUM_USERS) -> pd.DataFrame:
+def generate_synthetic_questions(n: int = config.NUM_QUESTIONS) -> pd.DataFrame:
     """
-    Builds a synthetic `users` table with a hidden `latent_skill` variable.
-
-    latent_skill is the generative "ground truth" ability score that drives
-    (a) submission correctness probability and (b) the contest_rating target.
-    It is NEVER passed to the ML models -- it exists purely so the synthetic
-    dataset has a coherent underlying signal for the models to rediscover
-    from observable features, exactly like a real learner's true skill drives
-    their observable submission history.
+    Returns canonical questions matching the question universe, with length n.
     """
-    rng = _rng()
-    latent_skill = rng.normal(loc=0.0, scale=1.0, size=n)
-    account_age_days = rng.integers(30, 1500, size=n)
+    return load_canonical_questions(n)
 
-    # Contest rating: baseline + skill effect + mild experience effect + noise.
+
+def generate_synthetic_users(
+    n: int = config.NUM_USERS,
+    random_seed: int = config.RANDOM_SEED,
+    return_latent_info: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Builds a synthetic `users` table driven by realistic user archetypes.
+
+    Simulation Design (Latent Simulation Variables vs Observable Features):
+    - LATENT SIMULATION VARIABLES (ground truth used only for event generation):
+        * archetype: Behavioral archetype name (e.g. weak_dp, improving, specialized)
+        * base_skill: Ground-truth baseline ability
+        * topic_affinities: Dict of topic-specific skill offsets
+        * hard_resilience: Specific ability offset when facing Hard problems
+        * learning_rate_trend: Temporal progress slope over 365 days
+        * attempt_tendency: Tendency to make multiple rapid attempts per problem
+    - OBSERVABLE MODEL FEATURES (rediscovered by ML models via submission logs):
+        * overall_accuracy, accuracy_easy, accuracy_medium, accuracy_hard
+        * share_easy, share_medium, share_hard, recency_momentum, recent_submission_count,
+          attempts_per_problem, failure_rate, account_age_days
+    - TARGET (regression label for XGBoost rating model):
+        * contest_rating: Modeled as a function of the user's final true skill and experience.
+
+    Latent simulation variables are strictly NEVER passed as input features to predictive models!
+    """
+    rng = _rng(random_seed)
+    archetype_names = config.USER_ARCHETYPES
+    archetypes = [archetype_names[i % len(archetype_names)] for i in range(n)]
+
+    base_skills = np.zeros(n)
+    hard_resilience = np.zeros(n)
+    learning_slopes = np.zeros(n)
+    attempt_multipliers = np.ones(n)
+    topic_affinities_list = []
+
+    for i, arch in enumerate(archetypes):
+        aff = {}
+        if arch == "strong_overall":
+            base_skills[i] = rng.normal(1.6, 0.25)
+            hard_resilience[i] = 0.5
+        elif arch == "weak_dp":
+            base_skills[i] = rng.normal(0.8, 0.25)
+            aff["Dynamic Programming"] = -2.0
+        elif arch == "weak_graph":
+            base_skills[i] = rng.normal(0.8, 0.25)
+            for t in ["Graph", "Tree", "Depth-First Search", "Breadth-First Search"]:
+                aff[t] = -1.8
+        elif arch == "strong_easy_med_weak_hard":
+            base_skills[i] = rng.normal(1.1, 0.25)
+            hard_resilience[i] = -2.2
+        elif arch == "improving":
+            base_skills[i] = -1.2
+            learning_slopes[i] = 2.4 / 365.0  # begins at -1.2, reaches +1.2 by day 365
+        elif arch == "declining":
+            base_skills[i] = 1.2
+            learning_slopes[i] = -2.4 / 365.0  # begins at +1.2, drops to -1.2 by day 365
+        elif arch == "stable":
+            base_skills[i] = rng.normal(0.0, 0.35)
+        elif arch == "high_attempt_low_accuracy":
+            base_skills[i] = rng.normal(-0.6, 0.25)
+            attempt_multipliers[i] = 2.5
+        elif arch == "specialized":
+            base_skills[i] = rng.normal(0.2, 0.25)
+            for t in ["Array", "String", "Math", "Two Pointers"]:
+                aff[t] = 1.5
+            for t in ["Dynamic Programming", "Graph", "Tree", "Trie", "Backtracking"]:
+                aff[t] = -1.5
+
+        topic_affinities_list.append(aff)
+
+    account_age_days = rng.integers(60, 1400, size=n)
+    # The user's final effective skill at the evaluation horizon (day 365)
+    final_skill = base_skills + learning_slopes * np.minimum(account_age_days, 365)
+
+    # Ground-truth synthetic contest rating
     contest_rating = (
-        1200
-        + 260 * latent_skill
-        + 0.08 * np.sqrt(account_age_days) * 10
-        + rng.normal(0, 60, n)
+        1200.0
+        + 260.0 * final_skill
+        + 45.0 * hard_resilience
+        + 0.08 * np.sqrt(account_age_days) * 10.0
+        + rng.normal(0, 35.0, size=n)
     )
-    contest_rating = np.clip(contest_rating, 800, 3000)
+    contest_rating = np.clip(contest_rating, 800.0, 3000.0)
 
-    df = pd.DataFrame({
+    users_df = pd.DataFrame({
         "user_id": np.arange(1, n + 1),
         "account_age_days": account_age_days,
-        "latent_skill": latent_skill,
+        "latent_skill": final_skill,
         "contest_rating": contest_rating,
     })
-    return df[USER_COLUMNS]
+
+    if return_latent_info:
+        latent_df = pd.DataFrame({
+            "user_id": np.arange(1, n + 1),
+            "archetype": archetypes,
+            "base_skill": base_skills,
+            "hard_resilience": hard_resilience,
+            "learning_slope": learning_slopes,
+            "attempt_multiplier": attempt_multipliers,
+            "topic_affinities": topic_affinities_list,
+        })
+        return users_df[USER_COLUMNS], latent_df
+
+    return users_df[USER_COLUMNS]
 
 
 def generate_synthetic_submissions(
     users_df: pd.DataFrame,
     questions_df: pd.DataFrame,
     n_submissions: int = config.NUM_SUBMISSIONS,
+    random_seed: int = config.RANDOM_SEED,
+    latent_users_info: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Builds a synthetic `submissions` log.
-
-    Correctness probability is modeled with a vectorized logistic function of
-    (user latent_skill - question difficulty_score), i.e. classic item-response
-    theory. This produces realistic patterns: strong users still occasionally
-    fail Hard problems, weak users occasionally fluke an Easy one.
+    Builds a synthetic submissions log reflecting user archetypes, item response theory,
+    topic affinities, temporal progress, and bursty re-attempts.
     """
-    rng = _rng()
+    rng = _rng(random_seed)
+    n_users = len(users_df)
+    n_questions = len(questions_df)
 
-    user_ids = rng.integers(1, len(users_df) + 1, size=n_submissions)
-    question_ids = rng.integers(1, len(questions_df) + 1, size=n_submissions)
+    user_ids = users_df["user_id"].to_numpy()
+    question_ids = questions_df["question_id"].to_numpy()
+    question_diffs = questions_df["difficulty"].map(config.DIFFICULTY_SCORE).to_numpy()
 
-    skill_lookup = users_df.set_index("user_id")["latent_skill"].to_numpy()
-    difficulty_lookup = questions_df.set_index("question_id")["difficulty"].map(config.DIFFICULTY_SCORE).to_numpy()
+    # Pre-map question topics
+    tag_lookup = dict(zip(questions_df["question_id"], questions_df["topic_tags"]))
+    diff_lookup = dict(zip(questions_df["question_id"], question_diffs))
 
-    user_skill = skill_lookup[user_ids - 1]
-    question_difficulty = difficulty_lookup[question_ids - 1]
+    # Retrieve or reconstruct latent archetype profiles
+    if latent_users_info is not None:
+        latent_info = latent_users_info.set_index("user_id").to_dict(orient="index")
+    else:
+        # Reconstruct archetype parameters deterministically from user index
+        latent_info = {}
+        archetype_names = config.USER_ARCHETYPES
+        for u in user_ids:
+            arch = archetype_names[(u - 1) % len(archetype_names)]
+            base_skill = 0.0
+            hard_res = 0.0
+            slope = 0.0
+            att_mult = 1.0
+            aff = {}
+            if arch == "strong_overall":
+                base_skill = 1.6; hard_res = 0.5
+            elif arch == "weak_dp":
+                base_skill = 0.8; aff["Dynamic Programming"] = -2.0
+            elif arch == "weak_graph":
+                base_skill = 0.8
+                for t in ["Graph", "Tree", "Depth-First Search", "Breadth-First Search"]: aff[t] = -1.8
+            elif arch == "strong_easy_med_weak_hard":
+                base_skill = 1.1; hard_res = -2.2
+            elif arch == "improving":
+                base_skill = -1.2; slope = 2.4 / 365.0
+            elif arch == "declining":
+                base_skill = 1.2; slope = -2.4 / 365.0
+            elif arch == "stable":
+                base_skill = 0.0
+            elif arch == "high_attempt_low_accuracy":
+                base_skill = -0.6; att_mult = 2.5
+            elif arch == "specialized":
+                base_skill = 0.2
+                for t in ["Array", "String", "Math", "Two Pointers"]: aff[t] = 1.5
+                for t in ["Dynamic Programming", "Graph", "Tree", "Trie", "Backtracking"]: aff[t] = -1.5
 
-    # Item-response-theory style solve probability (fully vectorized sigmoid).
-    logits = 1.4 * (user_skill - (question_difficulty - 2.2))
-    solve_prob = 1.0 / (1.0 + np.exp(-logits))
+            latent_info[u] = {
+                "archetype": arch,
+                "base_skill": base_skill,
+                "hard_resilience": hard_res,
+                "learning_slope": slope,
+                "attempt_multiplier": att_mult,
+                "topic_affinities": aff,
+            }
 
-    is_accepted = rng.binomial(1, np.clip(solve_prob, 0.02, 0.98))
+    # Weight user activity: high_attempt users submit more often
+    user_weights = np.array([latent_info[u]["attempt_multiplier"] for u in user_ids])
+    user_weights /= user_weights.sum()
 
-    # For failed attempts, distribute across the non-Accepted statuses.
+    sub_user_ids = rng.choice(user_ids, size=n_submissions, p=user_weights)
+
+    # Pre-build per-archetype problem selection distributions across canonical questions
+    archetype_q_weights = {}
+    for arch in config.USER_ARCHETYPES:
+        w = np.ones(n_questions, dtype=float)
+        for j, qid in enumerate(question_ids):
+            tags_j = tag_lookup.get(qid, [])
+            diff_j = questions_df.iloc[j]["difficulty"] if "difficulty" in questions_df.columns else "Medium"
+            # Difficulty preference
+            if arch == "strong_overall":
+                w[j] *= 3.0 if diff_j == "Hard" else 1.2 if diff_j == "Medium" else 0.4
+            elif arch in ("strong_easy_med_weak_hard", "high_attempt_low_accuracy"):
+                w[j] *= 0.15 if diff_j == "Hard" else 1.0 if diff_j == "Medium" else 1.8
+
+            # Topic focus
+            if arch == "weak_dp" and "Dynamic Programming" in tags_j:
+                w[j] *= 3.5
+            elif arch == "weak_graph" and any(t in tags_j for t in ["Graph", "Tree", "Depth-First Search", "Breadth-First Search"]):
+                w[j] *= 3.0
+            elif arch == "specialized":
+                if any(t in tags_j for t in ["Array", "String", "Math", "Two Pointers"]):
+                    w[j] *= 2.5
+                else:
+                    w[j] *= 0.4
+        archetype_q_weights[arch] = w / w.sum()
+
+    sub_q_ids = np.zeros(n_submissions, dtype=int)
+    for u in user_ids:
+        mask = np.where(sub_user_ids == u)[0]
+        cnt = len(mask)
+        if cnt > 0:
+            arch = latent_info[u]["archetype"]
+            p_dist = archetype_q_weights[arch]
+            p_retry = 0.50 if arch == "high_attempt_low_accuracy" else 0.20
+
+            curr_q = rng.choice(question_ids, p=p_dist)
+            u_qs = []
+            for _ in range(cnt):
+                if u_qs and rng.random() < p_retry:
+                    u_qs.append(curr_q)
+                else:
+                    curr_q = rng.choice(question_ids, p=p_dist)
+                    u_qs.append(curr_q)
+            sub_q_ids[mask] = u_qs
+
+    # Days ago: submissions span DATASET_WINDOW_DAYS with power-law recency skew
+    days_ago = (rng.power(1.4, size=n_submissions) * config.DATASET_WINDOW_DAYS).astype(float)
+    now = pd.Timestamp.now().normalize()
+    timestamps = now - pd.to_timedelta(days_ago, unit="D")
+
+    # Vectorized / batched solve probability calculation
+    solve_probs = np.zeros(n_submissions, dtype=float)
+    for i in range(n_submissions):
+        uid = sub_user_ids[i]
+        qid = sub_q_ids[i]
+        d_ago = days_ago[i]
+        info = latent_info[uid]
+
+        # Temporal skill at the moment of submission
+        day_t = max(0.0, config.DATASET_WINDOW_DAYS - d_ago)
+        current_skill = info["base_skill"] + info["learning_slope"] * day_t
+
+        # Topic affinity
+        q_tags = tag_lookup.get(qid, [])
+        affs = info["topic_affinities"]
+        topic_eff = 0.0
+        if q_tags:
+            matches = [affs[t] for t in q_tags if t in affs]
+            if matches:
+                topic_eff = float(np.mean(matches))
+
+        q_diff = diff_lookup.get(qid, 2.2)
+        # Apply hard resilience penalty if difficulty is Hard (diff >= 3.0)
+        eff_diff = q_diff - (info["hard_resilience"] if q_diff >= 3.0 else 0.0)
+
+        logit = 1.4 * (current_skill + topic_eff - (eff_diff - 2.2))
+        prob = 1.0 / (1.0 + np.exp(-np.clip(logit, -10.0, 10.0)))
+        solve_probs[i] = prob
+
+    is_accepted = rng.binomial(1, np.clip(solve_probs, 0.02, 0.98))
+
     fail_statuses = config.SUBMISSION_STATUSES[1:]
     fail_weights = config.STATUS_BASE_WEIGHTS[1:] / config.STATUS_BASE_WEIGHTS[1:].sum()
     fail_choice = rng.choice(fail_statuses, size=n_submissions, p=fail_weights)
 
     status = np.where(is_accepted == 1, "Accepted", fail_choice)
-
-    # Timestamps: skew recent activity slightly heavier (power-law over the window).
-    days_ago = (rng.power(1.5, size=n_submissions) * config.DATASET_WINDOW_DAYS).astype(int)
-    timestamps = pd.Timestamp.now().normalize() - pd.to_timedelta(days_ago, unit="D")
-
     runtime_ms = rng.gamma(shape=2.0, scale=45.0, size=n_submissions)
     language = rng.choice(config.LANGUAGES, size=n_submissions, p=[0.5, 0.2, 0.15, 0.1, 0.05])
 
     df = pd.DataFrame({
-        "user_id": user_ids,
-        "question_id": question_ids,
+        "user_id": sub_user_ids,
+        "question_id": sub_q_ids,
         "timestamp": timestamps,
         "status": status,
         "runtime_ms": runtime_ms,
@@ -187,11 +392,75 @@ def generate_synthetic_submissions(
     return df[SUBMISSION_COLUMNS]
 
 
+def user_train_val_test_split(
+    users_df: pd.DataFrame,
+    submissions_df: pd.DataFrame,
+    train_ratio: float = config.TRAIN_USER_RATIO,
+    val_ratio: float = config.VAL_USER_RATIO,
+    test_ratio: float = config.TEST_USER_RATIO,
+    random_seed: int = config.RANDOM_SEED,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Performs clean USER-LEVEL partitioning into train, validation, and test sets.
+    Guarantee: Submissions from the same user are NEVER split across sets, avoiding leakage.
+    """
+    rng = _rng(random_seed)
+    uids = np.array(sorted(users_df["user_id"].unique()))
+    rng.shuffle(uids)
+
+    n_users = len(uids)
+    n_train = int(round(train_ratio * n_users))
+    n_val = int(round(val_ratio * n_users))
+
+    train_uids = set(uids[:n_train])
+    val_uids = set(uids[n_train:n_train + n_val])
+    test_uids = set(uids[n_train + n_val:])
+
+    train_users = users_df[users_df["user_id"].isin(train_uids)].reset_index(drop=True)
+    val_users = users_df[users_df["user_id"].isin(val_uids)].reset_index(drop=True)
+    test_users = users_df[users_df["user_id"].isin(test_uids)].reset_index(drop=True)
+
+    train_subs = submissions_df[submissions_df["user_id"].isin(train_uids)].reset_index(drop=True)
+    val_subs = submissions_df[submissions_df["user_id"].isin(val_uids)].reset_index(drop=True)
+    test_subs = submissions_df[submissions_df["user_id"].isin(test_uids)].reset_index(drop=True)
+
+    return train_users, val_users, test_users, train_subs, val_subs, test_subs
+
+
+def temporal_split_user_submissions(
+    submissions_df: pd.DataFrame,
+    history_ratio: float = config.TEMPORAL_HISTORY_RATIO,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Performs chronological splitting within each user's submissions:
+    First `history_ratio` fraction as historical context, remainder as held-out future interactions.
+    Used for temporal evaluation of recommendations and weak-topic detection.
+    """
+    sub_sorted = submissions_df.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
+
+    history_rows = []
+    future_rows = []
+
+    for uid, group in sub_sorted.groupby("user_id"):
+        n_items = len(group)
+        if n_items <= 2:
+            history_rows.append(group)
+            continue
+        split_idx = max(1, int(round(n_items * history_ratio)))
+        split_idx = min(split_idx, n_items - 1)
+        history_rows.append(group.iloc[:split_idx])
+        future_rows.append(group.iloc[split_idx:])
+
+    history_df = pd.concat(history_rows, ignore_index=True) if history_rows else sub_sorted.iloc[:0]
+    future_df = pd.concat(future_rows, ignore_index=True) if future_rows else sub_sorted.iloc[:0]
+    return history_df, future_df
+
+
 def generate_full_synthetic_dataset():
     """Convenience entry point returning (users_df, questions_df, submissions_df)."""
     questions_df = generate_synthetic_questions()
-    users_df = generate_synthetic_users()
-    submissions_df = generate_synthetic_submissions(users_df, questions_df)
+    users_df, latent_info = generate_synthetic_users(return_latent_info=True)
+    submissions_df = generate_synthetic_submissions(users_df, questions_df, latent_users_info=latent_info)
     return users_df, questions_df, submissions_df
 
 def _parse_topic_tags(value: Any) -> list[str]:
@@ -516,23 +785,67 @@ def _normalize_export_submissions(raw_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build_questions_from_export(submissions_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[Any, int]]:
-    questions = (
+    """
+    Aligns exported submissions with the canonical question catalogue.
+    Maps known problem slugs / titles to their canonical integer question_id.
+    New/unseen problems receive deterministic new IDs beyond the canonical range.
+    Returns the comprehensive questions_df (canonical universe + unseen user problems)
+    and the id mapping for submissions_df.
+    """
+    canonical_df = load_canonical_questions()
+    canonical_slug_to_id = {}
+    canonical_title_to_id = {}
+    if "slug" in canonical_df.columns:
+        canonical_slug_to_id = dict(zip(canonical_df["slug"].astype(str).str.lower(), canonical_df["question_id"]))
+    canonical_title_to_id = dict(zip(canonical_df["title"].astype(str).str.lower(), canonical_df["question_id"]))
+
+    max_canonical_id = int(canonical_df["question_id"].max()) if not canonical_df.empty else 0
+
+    unique_export = (
         submissions_df[["question_id", "title", "difficulty", "topic_tags", "acceptance_rate"]]
         .drop_duplicates(subset=["question_id"])
         .copy()
     )
-    if "description" not in questions.columns:
-        questions["description"] = (
-            questions["title"].astype(str)
-            + " "
-            + questions["difficulty"].astype(str)
-            + " problem statement"
-        )
-    questions = questions.reset_index(drop=True)
-    questions["question_key"] = questions["question_id"]
-    questions["question_id"] = np.arange(1, len(questions) + 1)
-    question_id_map = dict(zip(questions["question_key"], questions["question_id"]))
-    return questions[QUESTION_COLUMNS], question_id_map
+
+    question_id_map: dict[Any, int] = {}
+    extra_questions = []
+    next_new_id = max_canonical_id + 1
+
+    for _, row in unique_export.iterrows():
+        raw_key = row["question_id"]
+        key_str = str(raw_key).strip().lower()
+        title_str = str(row["title"]).strip().lower()
+
+        matched_id = None
+        if key_str in canonical_slug_to_id:
+            matched_id = canonical_slug_to_id[key_str]
+        elif title_str in canonical_title_to_id:
+            matched_id = canonical_title_to_id[title_str]
+        elif key_str.isdigit() and int(key_str) in set(canonical_df["question_id"]):
+            matched_id = int(key_str)
+
+        if matched_id is not None:
+            question_id_map[raw_key] = matched_id
+        else:
+            assigned_id = next_new_id
+            next_new_id += 1
+            question_id_map[raw_key] = assigned_id
+            desc = f"{row['title']} {row['difficulty']} problem statement"
+            extra_questions.append({
+                "question_id": assigned_id,
+                "title": row["title"],
+                "description": desc,
+                "difficulty": row["difficulty"],
+                "topic_tags": row["topic_tags"],
+                "acceptance_rate": row["acceptance_rate"],
+            })
+
+    if extra_questions:
+        full_questions_df = pd.concat([canonical_df, pd.DataFrame(extra_questions)], ignore_index=True)
+    else:
+        full_questions_df = canonical_df.copy()
+
+    return full_questions_df[QUESTION_COLUMNS], question_id_map
 
 
 def _build_users_from_export(submissions_df: pd.DataFrame) -> pd.DataFrame:
@@ -560,15 +873,6 @@ def load_leetcode_history_export(export_path: str | Path) -> tuple[pd.DataFrame,
     users_df = _build_users_from_export(submissions_df)
     users_df["user_id"] = users_df["user_id"].map(user_id_map)
 
-    # Augment the question bank if the export contains only attempted items.
-    if len(questions_df) < 50:
-        synthetic_questions = generate_synthetic_questions(n=50)
-        start_id = int(questions_df["question_id"].max()) + 1 if not questions_df.empty else 1
-        synthetic_questions = synthetic_questions.assign(
-            question_id=np.arange(start_id, start_id + len(synthetic_questions))
-        )
-        questions_df = pd.concat([questions_df, synthetic_questions], ignore_index=True)
-
     return users_df[USER_COLUMNS], questions_df[QUESTION_COLUMNS], submissions_df[SUBMISSION_COLUMNS]
 
 
@@ -587,14 +891,6 @@ def load_leetcode_history_records(records: list[dict]) -> tuple[pd.DataFrame, pd
     submissions_df["user_id"] = submissions_df["user_id"].map(user_id_map)
     users_df = _build_users_from_export(submissions_df)
     users_df["user_id"] = users_df["user_id"].map(user_id_map)
-
-    if len(questions_df) < 50:
-        synthetic_questions = generate_synthetic_questions(n=50)
-        start_id = int(questions_df["question_id"].max()) + 1 if not questions_df.empty else 1
-        synthetic_questions = synthetic_questions.assign(
-            question_id=np.arange(start_id, start_id + len(synthetic_questions))
-        )
-        questions_df = pd.concat([questions_df, synthetic_questions], ignore_index=True)
 
     return users_df[USER_COLUMNS], questions_df[QUESTION_COLUMNS], submissions_df[SUBMISSION_COLUMNS]
 
@@ -629,7 +925,10 @@ class FeatureEngineer:
     def __init__(self, users_df: pd.DataFrame, questions_df: pd.DataFrame, submissions_df: pd.DataFrame):
         self.users_df = users_df
         self.questions_df = questions_df
-        self.submissions_df = submissions_df.merge(
+        # Drop columns from submissions_df that will be merged from questions_df to avoid _x/_y suffix collision
+        overlap_cols = [c for c in ["difficulty", "topic_tags", "acceptance_rate", "title", "description"] if c in submissions_df.columns]
+        cleaned_submissions = submissions_df.drop(columns=overlap_cols) if overlap_cols else submissions_df
+        self.submissions_df = cleaned_submissions.merge(
             questions_df[["question_id", "difficulty", "topic_tags", "acceptance_rate"]],
             on="question_id", how="left",
         )
@@ -638,6 +937,10 @@ class FeatureEngineer:
     def compute_accuracy_ratios(self) -> pd.DataFrame:
         """Overall and per-difficulty accuracy ratio, one row per user."""
         sub = self.submissions_df
+        cols = ["total_submissions", "total_accepted", "overall_accuracy", "accuracy_easy", "accuracy_medium", "accuracy_hard"]
+        if sub.empty:
+            return pd.DataFrame(columns=cols, index=pd.Index([], name="user_id"))
+
         sub = sub.assign(is_accepted=(sub["status"] == "Accepted").astype(int))
 
         overall = (
@@ -664,6 +967,10 @@ class FeatureEngineer:
     def compute_difficulty_distribution(self) -> pd.DataFrame:
         """Share of a user's total attempts spent on Easy/Medium/Hard problems."""
         sub = self.submissions_df
+        cols = ["share_easy", "share_medium", "share_hard"]
+        if sub.empty:
+            return pd.DataFrame(columns=cols, index=pd.Index([], name="user_id"))
+
         counts = pd.pivot_table(
             sub, index="user_id", columns="difficulty", values="question_id",
             aggfunc="count", fill_value=0,
@@ -680,16 +987,22 @@ class FeatureEngineer:
         Exponentially time-decayed "momentum" score per user:
 
             momentum = sum(weight_i * is_accepted_i) / sum(weight_i)
-            weight_i = 0.5 ** (days_ago_i / half_life_days)
+            lambda = ln(2) / half_life_days
+            weight_i = exp(-lambda * days_ago_i)
 
         This rewards users who are *currently* solving well over users whose
         accuracy was good months ago but has since stalled -- much stronger
         signal for predicting a near-term contest rating than a flat average.
         """
         sub = self.submissions_df.copy()
+        cols = ["recency_momentum", "recent_submission_count"]
+        if sub.empty:
+            return pd.DataFrame(columns=cols, index=pd.Index([], name="user_id"))
+
         now = sub["timestamp"].max()
         days_ago = (now - sub["timestamp"]).dt.total_seconds() / 86400.0
-        weight = np.power(0.5, days_ago / half_life_days)
+        decay_lambda = np.log(2.0) / half_life_days
+        weight = np.exp(-decay_lambda * days_ago)
 
         sub["_weight"] = weight
         sub["_weighted_correct"] = weight * (sub["status"] == "Accepted").astype(int)
@@ -709,21 +1022,50 @@ class FeatureEngineer:
 
         return momentum.join(recent_activity, how="left").fillna(0.0)
 
-    # ---- 2d. Assemble final feature matrix ------------------------------------
+    # ---- 2d. Submission intensity & failure metrics --------------------------
+    def compute_submission_intensity(self) -> pd.DataFrame:
+        """Unique problem coverage, attempts per problem, and failure rate per user."""
+        sub = self.submissions_df
+        cols = ["unique_problems_attempted", "attempts_per_problem", "failure_rate"]
+        if sub.empty:
+            return pd.DataFrame(columns=cols, index=pd.Index([], name="user_id"))
+
+        intensity = (
+            sub.groupby("user_id")
+            .agg(
+                unique_problems_attempted=("question_id", "nunique"),
+                total_attempts=("question_id", "count"),
+                failed_attempts=("status", lambda s: (s != "Accepted").sum()),
+            )
+            .assign(
+                attempts_per_problem=lambda d: d["total_attempts"] / np.maximum(d["unique_problems_attempted"], 1),
+                failure_rate=lambda d: d["failed_attempts"] / np.maximum(d["total_attempts"], 1),
+            )
+            [["unique_problems_attempted", "attempts_per_problem", "failure_rate"]]
+        )
+        return intensity
+
+    # ---- 2e. Assemble final feature matrix ------------------------------------
     def build_user_feature_matrix(self) -> pd.DataFrame:
         """
         Joins all engineered feature blocks with static user attributes and
         the contest_rating label, returning the table predictor.py trains on.
+        Strictly drops all latent simulation variables to prevent target leakage.
         """
         features = (
             self.compute_accuracy_ratios()
             .join(self.compute_difficulty_distribution(), how="left")
             .join(self.compute_recency_momentum(), how="left")
+            .join(self.compute_submission_intensity(), how="left")
             .fillna(0.0)
         )
 
         full = self.users_df.set_index("user_id").join(features, how="left").fillna(0.0)
-        full = full.drop(columns=["latent_skill"])  # never leak the generative ground truth into modeling
+        drop_leakage = [
+            "latent_skill", "archetype", "base_skill", "hard_resilience",
+            "learning_slope", "attempt_multiplier", "topic_affinities"
+        ]
+        full = full.drop(columns=[c for c in drop_leakage if c in full.columns], errors="ignore")
         return full.reset_index()
 
     # ---- 2e. Raw failed submissions for the NLP engine ------------------------
@@ -824,12 +1166,13 @@ def compute_user_topic_profile(
             weakness_level = "Neutral"
             risk_score = 0.0
         else:
-            # Skill & Risk Composite Score
+            # Skill & Risk Composite Score:
+            # 0.50 * (1 - Accuracy_decayed) + 0.30 * (1 - Accuracy_lifetime) + 0.20 * min(1, failures / 5)
+            failures = max(0, attempts - accepted_cnt)
             risk_score = (
-                0.40 * (1.0 - success_rate)
-                + 0.30 * (1.0 - recency_success)
-                + 0.20 * easy_fail_rate
-                + 0.10 * (1.0 - min(1.0, unique_attempted / 10.0))
+                0.50 * (1.0 - recency_success)
+                + 0.30 * (1.0 - success_rate)
+                + 0.20 * min(1.0, failures / 5.0)
             )
 
             if (success_rate <= 0.42 and attempts >= 8) or (risk_score >= 0.55 and attempts >= 5):

@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from typing import Dict
 
+import config
 from data_processing import (
     FeatureEngineer,
     generate_full_synthetic_dataset,
@@ -26,7 +27,7 @@ from recommender import HybridRecommender
 
 
 class LeetCodeMentor:
-    """Facade class -- builds every engine once, then serves per-user reports."""
+    """Facade class -- loads pre-trained models and serves per-user reports."""
 
     def __init__(self, users_df, questions_df, submissions_df):
         self.users_df = users_df
@@ -37,14 +38,39 @@ class LeetCodeMentor:
         self.feature_engineer = FeatureEngineer(self.users_df, self.questions_df, self.submissions_df)
         self.feature_matrix = self.feature_engineer.build_user_feature_matrix()
 
-        print("[2/4] Training recommendation engine (ALS + content-based) ...")
+        print("[2/4] Initializing recommendation engine (ALS fold-in + content-based) ...")
         self.recommender = HybridRecommender(self.questions_df, self.submissions_df)
 
-        print("[3/4] Training contest rating predictor (XGBoost) ...")
+        print("[3/4] Loading offline-trained contest rating predictor (XGBoost) ...")
         self.predictor = ContestRatingPredictor()
-        self.training_metrics = self.predictor.fit(self.feature_matrix)
+        if config.RATING_MODEL_PATH.exists():
+            try:
+                self.predictor.load_model(config.RATING_MODEL_PATH)
+            except Exception as e:
+                print(f"Warning: Failed to load rating model from {config.RATING_MODEL_PATH}: {e}")
 
-        print("Loading sentence-transformer for weak-topic analysis (lazy) ...")
+        # Load offline evaluation metrics from model_metadata.json if available
+        self.training_metrics = {}
+        if config.MODEL_METADATA_PATH.exists():
+            try:
+                meta = json.loads(config.MODEL_METADATA_PATH.read_text(encoding="utf-8"))
+                test_eval = meta.get("evaluation_metrics", {}).get("rating_model_test", {})
+                self.training_metrics = {
+                    "available": True,
+                    "rmse": test_eval.get("rmse"),
+                    "mae": test_eval.get("mae"),
+                    "r2": test_eval.get("r2"),
+                    "metadata": meta,
+                }
+            except Exception:
+                self.training_metrics = {"available": False, "note": "Failed to read model_metadata.json"}
+        else:
+            self.training_metrics = {
+                "available": False,
+                "note": "Model metadata not found. Run training/train_models.py to train offline models.",
+            }
+
+        print("[4/4] Initializing weak-topic analyzer (SentenceTransformer + c-TF-IDF) ...")
         self.topic_analyzer = WeakTopicAnalyzer()
 
         print("\nAll engines ready.\n")
@@ -93,15 +119,18 @@ class LeetCodeMentor:
         failed = self.feature_engineer.get_failed_submissions_with_text(user_id=user_id)
         weak_topics = self.topic_analyzer.analyze_user_weak_topics(failed)
 
-        # 3. Recommended questions (profile-guided & evidence-grounded)
+        # 3. Recommended questions (profile-guided & evidence-grounded via ALS fold-in + content)
+        user_subs = self.submissions_df[self.submissions_df["user_id"] == user_id]
         recommendations = self.recommender.recommend(
             user_id=user_id,
-            topic_profile=topic_profile_df
+            topic_profile=topic_profile_df,
+            user_submissions_df=user_subs,
+            top_k=kwargs.get("top_k", 5),
         ).to_dict(orient="records")
 
         # 4. Predicted contest rating
         user_features = self.feature_matrix[self.feature_matrix["user_id"] == user_id]
-        if self.training_metrics.get("available") and not user_features.empty:
+        if self.predictor.is_fitted and not user_features.empty:
             predicted_rating = float(round(self.predictor.predict(user_features)[0], 1))
         else:
             predicted_rating = None
@@ -113,11 +142,12 @@ class LeetCodeMentor:
                 "rmse": round(self.training_metrics["rmse"], 2) if self.training_metrics.get("rmse") is not None else None,
                 "mae": round(self.training_metrics["mae"], 2) if self.training_metrics.get("mae") is not None else None,
                 "r2": round(self.training_metrics["r2"], 3) if self.training_metrics.get("r2") is not None else None,
+                "benchmark_note": "Trained offline on synthetic benchmark population; serves as proxy estimate.",
             }
         else:
             eval_dict = {
                 "available": False,
-                "note": self.training_metrics.get("note", "Rating prediction model skipped due to insufficient multi-user training samples."),
+                "note": self.training_metrics.get("note", "Rating prediction model not loaded. Run python training/train_models.py first."),
             }
 
         report = {

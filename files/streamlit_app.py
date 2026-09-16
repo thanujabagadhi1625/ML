@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 
 import streamlit as st
 
+import config
 from data_processing import load_leetcode_history_export, load_leetcode_history_records
 from main import LeetCodeMentor
 
@@ -28,6 +29,12 @@ st.markdown(
     The app processes your submission history, builds user features, analyzes weak subtopics, and provides tailored recommendations.
     """
 )
+
+if not config.RATING_MODEL_PATH.exists() or not config.ALS_MODEL_PATH.exists():
+    st.warning(
+        "⚠️ **Offline model artifacts not detected.** "
+        "Run `python training/train_models.py` to pre-train the XGBoost contest predictor and ALS recommender."
+    )
 
 SYNC_STORE_PATH = Path(__file__).parent / "sync_store.json"
 DEMO_STORE_PATH = Path(__file__).parent / "demo" / "large_user.json"
@@ -174,7 +181,11 @@ if "report" in st.session_state:
     col1.metric("Total Submissions", diag.get("total_submissions", 0))
     col2.metric("Solved Submissions", diag.get("solved_submissions", 0))
     col3.metric("Failed Submissions", diag.get("failed_submissions", 0))
-    col4.metric("Contest Rating", rating_display)
+    col4.metric(
+        "Benchmark Rating",
+        rating_display,
+        help="Estimated via offline-trained XGBoost pipeline. Represents synthetic benchmark proxy, not official LeetCode rating."
+    )
 
     st.subheader("Data Quality Diagnostics")
     st.json(diag)
@@ -244,7 +255,12 @@ if "report" in st.session_state:
     st.subheader("Contest Rating Model Status")
     eval_info = report.get("model_evaluation", {})
     if eval_info.get("available"):
-        st.write(f"Model RMSE: {eval_info.get('rmse')} | MAE: {eval_info.get('mae')} | R^2: {eval_info.get('r2')}")
+        st.write(
+            f"**Offline Test Metrics (Untouched Users)** — RMSE: `{eval_info.get('rmse')}` | "
+            f"MAE: `{eval_info.get('mae')}` | R²: `{eval_info.get('r2')}`"
+        )
+        if eval_info.get("benchmark_note"):
+            st.caption(f"ℹ️ {eval_info['benchmark_note']}")
     else:
         st.info(eval_info.get("note", "Model evaluation unavailable."))
 
