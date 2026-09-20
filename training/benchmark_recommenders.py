@@ -137,6 +137,8 @@ def run_benchmark(
     als_params: dict | None = None,
     hybrid_weights: tuple[float, float, float] | None = None,
     evaluate_on: str = "test",
+    zipf_exponent: float = 0.8,
+    beta: float = 1.5,
     verbose: bool = True,
 ) -> dict[str, Any]:
     """
@@ -221,6 +223,8 @@ def run_benchmark(
                 questions_df=questions_df,
                 n_users=n_users,
                 random_seed=seed,
+                zipf_exponent=zipf_exponent,
+                beta=beta,
             )
             questions_df = questions_df_gen
             all_qids = questions_df["question_id"].tolist()
@@ -494,6 +498,8 @@ def run_benchmark(
             "seeds": seeds,
             "k_values": k_values,
             "evaluate_on": evaluate_on,
+            "zipf_exponent": zipf_exponent,
+            "beta": beta,
             "evaluated_users_total": len(user_evaluations["hybrid"]["precision@5"]),
             "evaluated_users_mean_per_seed": float(np.mean(evaluated_users_per_seed)),
             "gt_items_per_user_mean": float(np.mean(gt_items_per_user_per_seed)),
