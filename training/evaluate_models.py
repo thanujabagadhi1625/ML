@@ -24,6 +24,7 @@ if str(ROOT_DIR) not in sys.path:
 import config
 from data_processing import (
     FeatureEngineer,
+    generate_synthetic_dataset_v3,
     generate_synthetic_submissions,
     generate_synthetic_users,
     load_canonical_questions,
@@ -56,10 +57,21 @@ def run_evaluation():
     # Re-evaluate live against a fresh test set for verification
     print("\nRe-evaluating artifacts against held-out benchmark population...")
     questions_df = load_canonical_questions()
-    users_df, latent_info = generate_synthetic_users(n=config.NUM_USERS, return_latent_info=True)
-    subs_df = generate_synthetic_submissions(users_df, questions_df, latent_users_info=latent_info)
+    if config.CURRENT_PROFILE == "v3":
+        users_df, questions_df, subs_df, _ = generate_synthetic_dataset_v3(
+            questions_df=questions_df,
+            n_users=config.NUM_USERS,
+            random_seed=config.RANDOM_SEED,
+            zipf_exponent=0.8,
+            beta=1.5,
+        )
+    else:
+        users_df, latent_info = generate_synthetic_users(n=config.NUM_USERS, return_latent_info=True)
+        subs_df = generate_synthetic_submissions(users_df, questions_df, latent_users_info=latent_info)
 
-    _, _, test_users, _, _, test_subs = user_train_val_test_split(users_df, subs_df)
+    _, _, test_users, _, _, test_subs = user_train_val_test_split(
+        users_df, subs_df, random_seed=config.RANDOM_SEED
+    )
 
     fe_test = FeatureEngineer(test_users, questions_df, test_subs)
     test_matrix = fe_test.build_user_feature_matrix()

@@ -33,12 +33,12 @@ Standard platform dashboards provide flat aggregate metrics: total solved proble
 
 - **Local Submission Synchronization**: Ingests genuine LeetCode submission history via a Chrome extension (Manifest V3) or local JSON/CSV/TSV exports directly to a localhost FastAPI server.
 - **Strict Offline/Online Decoupling**: Models are trained offline on multi-user populations; live real-user inference runs without retraining, preventing overfitting and latency spikes.
-- **Canonical Question Catalogue**: Standardized universe of 453 LeetCode problems spanning 20 canonical algorithmic topics across Easy, Medium, and Hard tiers.
+- **Canonical Question Catalogue**: Standardized universe of 2,630 LeetCode problems (ingested from Hugging Face dataset [`kaysss/leetcode-problem-set`](https://huggingface.co/datasets/kaysss/leetcode-problem-set), MIT License) spanning 20 canonical algorithmic topics across Easy, Medium, and Hard tiers.
 - **Multi-Factor Weakness Profiling**: Computes composite risk scores combining lifetime success rate, time-decayed accuracy, and volume of failed attempts across topics.
 - **Exponential Recency Momentum**: Applies time-decay weighting ($0.5^{\Delta t / 21\text{ days}}$) to prioritize recent form over historical performance.
 - **Dense NLP Failure Clustering**: Encodes failed problem descriptions into 384-dimensional dense semantic vectors using `sentence-transformers` (`all-MiniLM-L6-v2`), groups them with silhouette-optimized K-Means, and extracts cluster keywords via canonical class-based TF-IDF (c-TF-IDF).
 - **Online ALS Closed-Form Fold-In**: Maps a real user into pre-trained implicit ALS latent space in $<1\text{ ms}$ via closed-form ridge regression without modifying catalog item factors.
-- **Hybrid Recommendation Engine**: Blends collaborative filtering (50%), tag-based content similarity (30%), and structured weakness boosting (20%) while enforcing catalog diversity.
+- **Hybrid Recommendation Engine**: Blends collaborative filtering, tag-based content similarity, and structured weakness boosting while enforcing catalog diversity (tuned on validation users to 1.0 CF, 0.0 Content, 0.0 Weakness under a 2-problem-per-topic diversity constraint).
 - **Contest Performance Benchmark Estimate**: Predicts a proxy contest rating on 15 observable behavioral features using an offline-trained XGBoost pipeline.
 - **Privacy-First Architecture**: 100% localhost execution. Zero cookies, passwords, or personal submission records are transmitted to third-party endpoints.
 
@@ -103,7 +103,7 @@ The core architectural boundary separates population-level offline training from
 │                             │                                                            │
 │         ┌───────────────────┼────────────────────────┐                                   │
 │         ▼                   ▼                        ▼                                   │
-│   XGBoost Regressor    Implicit ALS Model     Canonical Catalogue (453 questions)        │
+│   XGBoost Regressor    Implicit ALS Model     Canonical Catalogue (2,630 questions)        │
 │   (15 observable      (Learns item factors    & Dense Embeddings (all-MiniLM-L6-v2)      │
 │    features)           Y and Y^T Y)                                                      │
 │         │                   │                        │                                   │
@@ -138,7 +138,7 @@ The core architectural boundary separates population-level offline training from
 
 ### Why This Separation Is Necessary
 1. **Single-User Statistical Limitations**: An individual user solving 50–300 problems does not constitute a multi-user interaction distribution. You cannot train an Alternating Least Squares user-item matrix or a population-level regression model on a sample size of $N=1$.
-2. **Overfitting & Latency Prevention**: Retraining complex models on every browser sync would introduce high latency and catastrophic overfitting. Precomputing item factor matrices ($Y \in \mathbb{R}^{453 \times 24}$) and the Gramian ($Y^T Y \in \mathbb{R}^{24 \times 24}$) reduces online serving to solving a single $24 \times 24$ linear system in $<1\text{ ms}$.
+2. **Overfitting & Latency Prevention**: Retraining complex models on every browser sync would introduce high latency and catastrophic overfitting. Precomputing item factor matrices ($Y \in \mathbb{R}^{2630 \times 16}$) and the Gramian ($Y^T Y \in \mathbb{R}^{16 \times 16}$) reduces online serving to solving a single $16 \times 16$ linear system in $<1\text{ ms}$.
 3. **Zero Retraining Guarantee**: Model weights remain static and bit-for-bit immutable during dashboard execution.
 
 ---
@@ -259,10 +259,11 @@ If the user has fewer than 5 failed submissions, clustering is skipped and an in
 
 The recommendation engine combines collaborative filtering, content similarity, and topic weakness boosting:
 
-$$\text{FinalScore}_i = 0.50 \cdot \text{CF}_{\text{norm}}(i) + 0.30 \cdot \text{Content}_{\text{norm}}(i) + 0.20 \cdot \text{WeaknessBoost}(i)$$
+$$\text{FinalScore}_i = 1.0 \cdot \text{CF}_{\text{norm}}(i) + 0.0 \cdot \text{Content}_{\text{norm}}(i) + 0.0 \cdot \text{WeaknessBoost}(i)$$
+*(Hyperparameters tuned on validation users under a 2-problem-per-topic diversity constraint; see `results/tuning.json`)*
 
 ### 1. Collaborative Filtering via ALS Fold-In
-Trains on implicit feedback interactions ($r_{ui} = 3.0$ for Accepted, $1.0$ for Attempted) with confidence $c_{ui} = 1 + \alpha r_{ui}$ ($\alpha = 15.0$, $\lambda = 20.0$, $d = 24$):
+Trains on implicit feedback interactions ($r_{ui} = 3.0$ for Accepted, $1.0$ for Attempted) with confidence $c_{ui} = 1 + \alpha r_{ui}$ ($\alpha = 5.0$, $\lambda = 50.0$, $d = 16$, tuned on validation users):
 $$x_u = \left(Y^T Y + Y_u^T (C_u - I) Y_u + \lambda I_d\right)^{-1} Y_u^T C_u \mathbf{1}$$
 - **Cold-Start Guard**: Requires $\ge 3$ unique attempted problems. If $< 3$, the system smoothly falls back to $0.80 \cdot \text{Content} + 0.20 \cdot \text{Weakness}$.
 
@@ -295,52 +296,145 @@ The contest performance regressor uses an offline-trained **XGBoost Pipeline** (
 
 ## Synthetic Benchmark
 
-Because LeetCode does not provide an open multi-user dataset of timestamped submission event streams and historical contest ratings, the offline models are trained on a controlled synthetic population:
+Because live multi-user LeetCode submission streams and contest rating histories are proprietary, the offline models are trained and evaluated in a controlled generative simulation environment.
 
-- **Volume**: 600 synthetic users, 30,000 simulated submission event logs.
-- **Question Catalog**: 453 canonical LeetCode problems covering 20 algorithmic taxonomy tags.
-- **9 Behavioral Archetypes**:
-  1. `strong_overall`: High baseline skill, rapid progression across all problem tiers.
-  2. `weak_dp`: Strong general proficiency, but specific deficiency in Dynamic Programming.
-  3. `weak_graph`: Proficient in linear structures, struggles with Graph and Tree algorithms.
-  4. `strong_easy_med_weak_hard`: Solid Easy/Medium success rate, sharp drop-off on Hard problems.
-  5. `improving`: Moderate starting skill with strong positive learning slope over time.
-  6. `declining`: High initial skill followed by inactivity and decay.
-  7. `stable`: Consistent middle-tier performance over long practice windows.
-  8. `high_attempt_low_accuracy`: High attempt volume with low initial success rate; brute-force practice behavior.
-  9. `specialized`: High proficiency in Arrays/Strings/Math, low exposure to advanced structures.
-- **User-Level Partitioning**: 70% Train (420 users) | 15% Validation (90 users) | 15% Test (90 users). No user appears in multiple splits.
-- **Temporal Split**: Submissions per test user are chronologically split (80% observation history, 20% held-out future).
+### Problem Catalogue Provenance
+The problem catalogue is constructed from the Hugging Face dataset [`kaysss/leetcode-problem-set`](https://huggingface.co/datasets/kaysss/leetcode-problem-set) (MIT License), downloaded via `download_catalogue.py`. The canonical catalogue consists of **2,630 questions** spanning 20 algorithmic taxonomy tags across Easy, Medium, and Hard tiers, with zero unmapped fallback questions.
 
----
+### Generator Version History: v1 vs v3
+| Dimension | Generator v1 (Legacy) | Generator v3 (New Multi-Factor Simulator) |
+| :--- | :--- | :--- |
+| **Topic Interests** | Archetype-level static discrete weights | 20-dim Dirichlet vector per user; archetype shifts concentration mean |
+| **User Skill** | Single static archetype value | Individual Gaussian noise + time-varying chronological evolution |
+| **Question Popularity** | Uniform base choice | Heavy-tailed Zipf power-law distribution |
+| **Choice Mechanics** | Archetype categorical weights | $P(q) \propto \text{pop}(q) \cdot e^{\beta (\theta_u \cdot t_q)} \cdot \text{diff\_fit}(\text{skill}_u(t), d_q)$ |
+| **Timestamps** | Independent power-law draws; non-sequential | Strictly increasing chronological sequence; real 80/20 temporal split |
+| **Re-attempts** | Static retry loop | Failed submissions retry with $p_{\text{retry}}$; successes move on |
+| **Submissions Volume** | Fixed global pool allocated by multipliers | Lognormal heavy-tailed per user (min 20, mean ~100) |
+| **Contest Rating Target**| Evaluated on min(age, 365) while history spanned 365d | Consistent: skill evaluated at end of actual submission span |
+
+### Staged Benchmark Comparison Across Settings (S1 to S4)
+| Setting | Generator | Catalogue | Users | Popularity P@5 | Hybrid P@5 | Paired Diff (Hybrid - Pop) | ALS Time |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **S1 (Baseline)** | v1 | 453 (legacy) | 600 | `0.0115 ± 0.0059` | `0.0093 ± 0.0052` | `-0.0023 (95% CI [-0.0063, 0.0016])` | `0.54s` |
+| **S2 (Simulator v3)** | v3 | 453 (legacy) | 600 | `0.1559 ± 0.0152` | `0.0440 ± 0.0138` | `-0.1119 (95% CI [-0.1235, -0.1004])` | `0.58s` |
+| **S3 (Real Catalogue)** | v3 | 2630 (canonical) | 2,000 | `0.0930 ± 0.0071` | `0.0990 ± 0.0092` | `+0.0060 (95% CI [0.0017, 0.0103])` | `2.41s` |
+| **S4 (Scaled Scale)** | v3 | 2630 (canonical) | 4,000 | `0.1005 ± 0.0106` | `0.1022 ± 0.0116` | `+0.0016 (95% CI [-0.0016, 0.0048])` | `3.38s` |
+
+### Setting S3 (Production Configuration: Generator v3, 2630 Real Catalogue, 2000 Users) Recommendation Results (K=5 & K=10)
+*Evaluated Users:* 2975 across 10 seeds (mean 297.5 users/seed, avg ground-truth items: 7.68/user)
+*ALS Training Time:* 2.414s | *Interactions/user:* 66.4 | *Interactions/item:* 35.3 | *Matrix density:* 0.0252
+
+#### Metrics at K=5
+| Method | Precision@5 (mean ± std) | 95% Bootstrap CI | Recall@5 | Hit Rate@5 | NDCG@5 | Head Share@5 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Random** | `0.0036 ± 0.0014` | `[0.0027, 0.0045]` | `0.0025` | `1.78%` | `0.0043` | `19.2%` |
+| **Popularity** | `0.0930 ± 0.0071` | `[0.0883, 0.0979]` | `0.0696` | `38.07%` | `0.1126` | `100.0%` |
+| **Content-Only** | `0.0045 ± 0.0014` | `[0.0034, 0.0056]` | `0.0028` | `2.22%` | `0.0047` | `23.4%` |
+| **ALS-Only** | `0.1065 ± 0.0079` | `[0.1016, 0.1115]` | `0.0770` | `42.41%` | `0.1250` | `100.0%` |
+| **Hybrid Recommender** | `0.0990 ± 0.0092` | `[0.0943, 0.1036]` | `0.0714` | `41.04%` | `0.1191` | `100.0%` |
+
+#### Paired Differences at K=5 (vs Hybrid)
+| Comparison | Diff Precision@5 | 95% CI | Diff Recall@5 | 95% CI | Diff Hit Rate@5 | 95% CI |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Hybrid minus Popularity** | `+0.0060 ± 0.0101` | `[0.0017, 0.0103]` | `+0.0019` | `[-0.0014, 0.0050]` | `+2.96%` | `[+1.31%, +4.50%]` |
+| **Hybrid minus ALS-Only** | `-0.0076 ± 0.0075` | `[-0.0106, -0.0044]` | `-0.0056` | `[-0.0083, -0.0029]` | `-1.37%` | `[-2.52%, -0.17%]` |
+| **Hybrid minus Random** | `+0.0954 ± 0.0095` | `[0.0904, 0.1000]` | `+0.0689` | `[0.0649, 0.0731]` | `+39.26%` | `[+37.38%, +41.01%]` |
+
+#### Metrics at K=10
+| Method | Precision@10 (mean ± std) | 95% Bootstrap CI | Recall@10 | Hit Rate@10 | NDCG@10 | Head Share@10 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Random** | `0.0031 ± 0.0011` | `[0.0026, 0.0038]` | `0.0043` | `3.12%` | `0.0046` | `19.2%` |
+| **Popularity** | `0.0735 ± 0.0058` | `[0.0705, 0.0766]` | `0.1057` | `52.46%` | `0.1139` | `100.0%` |
+| **Content-Only** | `0.0043 ± 0.0011` | `[0.0035, 0.0050]` | `0.0054` | `4.20%` | `0.0053` | `23.6%` |
+| **ALS-Only** | `0.0824 ± 0.0055` | `[0.0792, 0.0858]` | `0.1158` | `56.09%` | `0.1245` | `100.0%` |
+| **Hybrid Recommender** | `0.0693 ± 0.0057` | `[0.0664, 0.0722]` | `0.0975` | `51.16%` | `0.1119` | `100.0%` |
+
+### Product-Goal Metrics (Setting S3: 2000 Users, Real Catalogue)
+| Method | Precision@5 | NDCG@10 | Weak Coverage@5 (mean ± std) | Difficulty Fit@5 (mean ± std) | Head Share@5 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Random** | `0.0036` | `0.0046` | `82.5% ± 1.7%` | `65.1% ± 2.0%` | `19.2%` |
+| **Popularity** | `0.0930` | `0.1139` | `85.7% ± 3.5%` | `72.2% ± 3.4%` | `100.0%` |
+| **ALS-Only** | `0.1065` | `0.1245` | `85.8% ± 2.8%` | `92.4% ± 1.3%` | `100.0%` |
+| **Hybrid Recommender (Production)** | `0.0990` | `0.1119` | `82.5% ± 3.3%` | `92.0% ± 1.3%` | `100.0%` |
+| **Hybrid (No Diversity Constraint)** | `0.1065` | `0.1245` | `85.8% ± 2.8%` | `92.4% ± 1.3%` | `100.0%` |
+
+### Setting S4 (Scaled Benchmark: Generator v3, 2630 Real Catalogue, 4000 Users) Recommendation Results (K=5 & K=10)
+*Evaluated Users:* 5936 across 10 seeds (mean 593.6 users/seed, avg ground-truth items: 7.90/user)
+*ALS Training Time:* 3.381s | *Interactions/user:* 66.9 | *Interactions/item:* 71.2 | *Matrix density:* 0.0254
+
+#### Metrics at K=5
+| Method | Precision@5 (mean ± std) | 95% Bootstrap CI | Recall@5 | Hit Rate@5 | NDCG@5 | Head Share@5 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Random** | `0.0035 ± 0.0009` | `[0.0028, 0.0042]` | `0.0023` | `1.75%` | `0.0037` | `19.4%` |
+| **Popularity** | `0.1005 ± 0.0106` | `[0.0970, 0.1042]` | `0.0709` | `39.34%` | `0.1187` | `100.0%` |
+| **Content-Only** | `0.0055 ± 0.0018` | `[0.0046, 0.0063]` | `0.0031` | `2.70%` | `0.0056` | `21.7%` |
+| **ALS-Only** | `0.1108 ± 0.0113` | `[0.1072, 0.1146]` | `0.0788` | `43.23%` | `0.1308` | `100.0%` |
+| **Hybrid Recommender** | `0.1022 ± 0.0116` | `[0.0986, 0.1058]` | `0.0721` | `40.49%` | `0.1243` | `100.0%` |
+
+#### Paired Differences at K=5 (vs Hybrid)
+| Comparison | Diff Precision@5 | 95% CI | Diff Recall@5 | 95% CI | Diff Hit Rate@5 | 95% CI |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Hybrid minus Popularity** | `+0.0016 ± 0.0104` | `[-0.0016, 0.0048]` | `+0.0012` | `[-0.0013, 0.0037]` | `+1.15%` | `[-0.02%, +2.34%]` |
+| **Hybrid minus ALS-Only** | `-0.0086 ± 0.0065` | `[-0.0109, -0.0064]` | `-0.0067` | `[-0.0087, -0.0048]` | `-2.74%` | `[-3.55%, -1.90%]` |
+| **Hybrid minus Random** | `+0.0987 ± 0.0111` | `[0.0950, 0.1023]` | `+0.0698` | `[0.0667, 0.0729]` | `+38.74%` | `[+37.48%, +40.03%]` |
+
+#### Metrics at K=10
+| Method | Precision@10 (mean ± std) | 95% Bootstrap CI | Recall@10 | Hit Rate@10 | NDCG@10 | Head Share@10 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Random** | `0.0032 ± 0.0005` | `[0.0027, 0.0036]` | `0.0041` | `3.12%` | `0.0040` | `19.4%` |
+| **Popularity** | `0.0783 ± 0.0077` | `[0.0761, 0.0806]` | `0.1105` | `53.55%` | `0.1181` | `100.0%` |
+| **Content-Only** | `0.0048 ± 0.0012` | `[0.0042, 0.0053]` | `0.0056` | `4.60%` | `0.0058` | `22.2%` |
+| **ALS-Only** | `0.0857 ± 0.0069` | `[0.0834, 0.0881]` | `0.1193` | `57.38%` | `0.1290` | `100.0%` |
+| **Hybrid Recommender** | `0.0708 ± 0.0071` | `[0.0687, 0.0730]` | `0.0982` | `50.20%` | `0.1145` | `100.0%` |
+
+### Product-Goal Metrics (Setting S4: 4000 Users, Real Catalogue)
+| Method | Precision@5 | NDCG@10 | Weak Coverage@5 (mean ± std) | Difficulty Fit@5 (mean ± std) | Head Share@5 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Random** | `0.0035` | `0.0040` | `83.0% ± 1.7%` | `65.9% ± 1.0%` | `19.4%` |
+| **Popularity** | `0.1005` | `0.1181` | `85.6% ± 3.6%` | `72.1% ± 3.0%` | `100.0%` |
+| **ALS-Only** | `0.1108` | `0.1290` | `86.0% ± 3.1%` | `92.4% ± 0.7%` | `100.0%` |
+| **Hybrid Recommender (Production)** | `0.1022` | `0.1145` | `82.6% ± 4.0%` | `92.2% ± 1.2%` | `100.0%` |
+| **Hybrid (No Diversity Constraint)** | `0.1108` | `0.1290` | `86.0% ± 3.1%` | `92.4% ± 0.7%` | `100.0%` |
+
+### Generator v3 Sensitivity Study: Popularity Skew (Zipf) x Topic Affinity (Beta)
+| Zipf Exponent | Beta | Popularity P@5 | Hybrid P@5 | Paired Diff (Hybrid - Pop) | Pop Head Share | Hybrid Head Share |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `0.0` | `0.5` | `0.0466` | `0.0255` | `-0.0210` (95% CI `[-0.0353, -0.0060]`) | `100.0%` | `40.9%` |
+| `0.0` | `1.0` | `0.0467` | `0.0378` | `-0.0089` (95% CI `[-0.0222, 0.0052]`) | `100.0%` | `45.3%` |
+| `0.0` | `2.0` | `0.0449` | `0.0225` | `-0.0225` (95% CI `[-0.0360, -0.0090]`) | `100.0%` | `44.4%` |
+| `0.4` | `0.5` | `0.1022` | `0.0418` | `-0.0605` (95% CI `[-0.0791, -0.0410]`) | `100.0%` | `39.9%` |
+| `0.4` | `1.0` | `0.0970` | `0.0342` | `-0.0627` (95% CI `[-0.0791, -0.0455]`) | `100.0%` | `37.4%` |
+| `0.4` | `2.0` | `0.1093` | `0.0417` | `-0.0676` (95% CI `[-0.0877, -0.0476]`) | `100.0%` | `50.3%` |
+| `0.8` | `0.5` | `0.1561` | `0.0417` | `-0.1144` (95% CI `[-0.1353, -0.0951]`) | `100.0%` | `55.9%` |
+| `0.8` | `1.0` | `0.1613` | `0.0453` | `-0.1160` (95% CI `[-0.1383, -0.0944]`) | `100.0%` | `55.7%` |
+| `0.8` | `2.0` | `0.1398` | `0.0436` | `-0.0962` (95% CI `[-0.1158, -0.0759]`) | `100.0%` | `54.8%` |
+| `1.2` | `0.5` | `0.1672` | `0.0626` | `-0.1045` (95% CI `[-0.1252, -0.0847]`) | `100.0%` | `84.1%` |
+| `1.2` | `1.0` | `0.1566` | `0.0678` | `-0.0887` (95% CI `[-0.1096, -0.0687]`) | `100.0%` | `86.6%` |
+| `1.2` | `2.0` | `0.1554` | `0.0656` | `-0.0897` (95% CI `[-0.1101, -0.0690]`) | `100.0%` | `84.9%` |
 
 ## Offline Evaluation Metrics
 
-All models were evaluated on strictly held-out test users (15% split) and future temporal interactions (20% split). The authoritative evaluation metrics serialized in `models/model_metadata.json` are:
+All models were evaluated across 10 random seeds with strict user-level partitioning (70% Train / 15% Validation / 15% Test) and temporal splits (80% historical observation / 20% future held-out ground truth). Every reported score reflects multi-seed aggregate metrics generated directly from JSON files in `results/`:
 
-### 1. Contest Rating Regressor (XGBoost)
-| Metric | Test Score | Description |
-| :--- | :--- | :--- |
-| **RMSE** | `177.29` | Root Mean Squared Error on held-out test users |
-| **MAE** | `136.23` | Mean Absolute Error in rating points |
-| **$R^2$** | `0.430` | Variance explained over test user distribution |
+### Contest Rating Regression Baselines (10 Seeds, Generator v3)
+| Model Architecture | $R^2$ (mean ± std) | RMSE (mean ± std) | MAE (mean ± std) | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Predict-the-Mean Baseline** | `-0.0039 ± 0.0029` | `227.43 ± 7.12` | `186.43 ± 6.07` | Predicts empirical training target mean $\bar{y}_{\text{train}}$ for all test users |
+| **Linear Regression Baseline** | `0.6249 ± 0.0271` | `138.91 ± 6.24` | `98.54 ± 3.80` | StandardScaler + Ordinary Least Squares linear regression |
+| **XGBoost Regressor (Production)** | `0.7043 ± 0.0318` | `123.29 ± 8.33` | `78.79 ± 6.09` | StandardScaler + Gradient Boosted Trees (Production architecture) |
 
-*Note on $R^2 \approx 0.430$*: Human contest performance exhibits high stochastic variance (unfamiliar problem idioms, implementation bugs, time pressure). An $R^2 = 0.430$ demonstrates that the model captures strong structural signal from practice history without overfitting to synthetic noise.
+*Note on $R^2$ Variance Explained*: The contest rating model is an offline benchmark proxy. The empirical $R^2$ variance explained (~0.70 for XGBoost vs ~0.62 for Linear Regression vs ~0.00 for Predict-the-Mean) depends directly on the number of submissions per user simulated in the generative environment; higher submission volumes yield sharper behavioral feature separation and stronger target recoverability.
 
-### 2. Hybrid Recommendation Engine
-| Metric | Test Score | Random Baseline | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Hit Rate@5** | `8.99%` | `4.65%` | **$1.93\times$** over random |
-| **Precision@5**| `1.80%` | `0.95%` | **$1.90\times$** over random |
-| **Recall@5**   | `2.17%` | — | Captured fraction of future solved problems |
-| **NDCG@5**     | `0.0219`| — | Normalized DCG bounded by $\min(K, \|\mathcal{G}_u\|)$ |
+### Weak-Topic Detection Baselines (10 Seeds, Predicting Future Failures)
+| Detection Method | Precision (mean ± std) | Recall (mean ± std) | F1 Score (mean ± std) | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **System (Composite Risk + Classification)** | `0.6320 ± 0.0200` | `0.5995 ± 0.0184` | `0.5892 ± 0.0189` | Flag topics classified as Critical or Weak via multi-factor decayed risk |
+| **All Attempted Topics Baseline** | `0.5269 ± 0.0191` | `0.9761 ± 0.0036` | `0.6650 ± 0.0169` | Predict all distinct topics previously attempted in user history |
+| **Top-2 Lifetime Failure Rate Baseline** | `0.4322 ± 0.0227` | `0.0831 ± 0.0034` | `0.1361 ± 0.0054` | Select the 2 topics with highest empirical failure rate in history |
+| **Random 2 Attempted Topics Baseline** | `0.5197 ± 0.0172` | `0.1018 ± 0.0035` | `0.1658 ± 0.0049` | Uniformly sample 2 topics from user's attempted history |
 
-### 3. Weak-Topic Detection
-| Metric | Test Score | Description |
-| :--- | :--- | :--- |
-| **Precision** | `62.40%` | Precision in predicting future topic failure points |
-| **Recall** | `49.62%` | Recall in capturing future topic failure points |
-| **F1 Score** | `0.5056` | Harmonic mean of weak-topic precision & recall |
+*Note on Weak-Topic Baselines*: The naive baseline 'All Attempted Topics' achieves high recall (0.976) because simulated users attempt a focused subset of ~5–7 topics over their span. However, the production **System** achieves significantly higher precision (0.6320 vs 0.5269), effectively filtering false positives while capturing 60.0% of future failure topics (F1 = 0.5892 ± 0.0189).
 
 ---
 
@@ -390,7 +484,7 @@ The interactive user interface in `files/streamlit_app.py` provides:
 - **Backend API**: FastAPI, Uvicorn, Pydantic v2, Requests.
 - **Frontend Dashboard**: Streamlit.
 - **Browser Extension**: JavaScript (ES6+), Chrome Manifest V3, HTML5, CSS3.
-- **Testing & Verification**: Unittest (31 tests).
+- **Testing & Verification**: Unittest (52 tests across 9 suites).
 
 ---
 
@@ -412,13 +506,13 @@ The interactive user interface in `files/streamlit_app.py` provides:
 │   └── styles.css                  # Dark-theme popup styling
 ├── models/                         # Offline-Trained Static Model Artifacts
 │   ├── als_model.npz               # Trained ALS item factors Y and Gramian Y^T Y
-│   ├── canonical_questions.json    # 453 canonical questions across 20 topics
+│   ├── canonical_questions.json    # 2,630 canonical questions across 20 topics
 │   ├── model_metadata.json         # Authoritative hyperparameters & test metrics
-│   ├── question_embeddings.npy     # Precomputed sentence embeddings (453, 384)
+│   ├── question_embeddings.npy     # Precomputed sentence embeddings (2630, 384)
 │   └── rating_model.pkl            # Pre-trained XGBoost contest rating pipeline
 ├── training/                       # Offline Training & Evaluation Scripts
 │   ├── __init__.py
-│   ├── build_canonical_catalogue.py # Generates canonical 453-question catalog
+│   ├── build_canonical_catalogue.py # Ingests and standardizes 2,630 canonical questions
 │   ├── evaluate_models.py          # Standalone benchmark evaluation runner
 │   └── train_models.py             # Offline training orchestrator
 ├── files/                          # Online Inference & Application Source
@@ -435,11 +529,14 @@ The interactive user interface in `files/streamlit_app.py` provides:
 │   ├── streamlit_app.py            # Interactive Streamlit dashboard UI
 │   └── demo/
 │       └── large_user.json         # Synthetic demo dataset for local testing
-└── tests/                          # Unit & Integration Test Suite (31 tests)
+└── tests/                          # Unit & Integration Test Suite (52 tests across 9 suites)
     ├── __init__.py
     ├── test_api_server.py          # FastAPI sync & status endpoint tests
+    ├── test_benchmark_recommenders.py # Multi-seed benchmark harness & metrics
     ├── test_data_processing.py     # Archetypes, user splits, temporal splits & features
     ├── test_end_to_end.py          # End-to-end inference & zero-retraining verification
+    ├── test_final_integrity.py     # Determinism, monotonic timestamps, split isolation
+    ├── test_generator_v3_spec.py   # Multi-factor generator specification verification
     ├── test_nlp_cluster.py         # Embedding, clustering, c-TF-IDF & cold-start guards
     ├── test_predictor.py           # Offline XGBoost, serialization & feature importance
     └── test_recommender.py         # ALS fold-in, cold-start fallback & diversity rules
@@ -532,7 +629,7 @@ OK
 
 The repository comes with pre-trained artifacts in `models/`. To regenerate the canonical catalog or retrain the benchmark models from scratch:
 ```bash
-# 1. Regenerate canonical 453-question universe
+# 1. Regenerate canonical 2,630-question universe
 python training/build_canonical_catalogue.py
 
 # 2. Train XGBoost, ALS, and precompute dense embeddings
@@ -556,11 +653,11 @@ This project implements a strict local-first privacy model:
 
 ## Limitations
 
-1. **Circularity Limitation**: Models are evaluated on data whose structure I designed, so results measure recoverability of my simulator, not real-world quality. Offline benchmark metrics demonstrate whether mathematical collaborative filtering and regression engines can reconstruct controlled generative signals, not whether they transfer losslessly to unobserved human behavioral distributions.
-2. **Synthetic Population Domain Gap**: Offline models are trained on simulated Item Response Theory distributions. While behavioral archetypes mirror human practice patterns, synthetic data cannot replicate all human nuances (e.g., contest server outages, copying external solutions).
-3. **Benchmark Proxy Rating**: The contest rating regressor estimates expected performance on a benchmark scale and should not be confused with official LeetCode contest ratings.
+1. **Circularity Limitation**: Models are evaluated on data whose structure was designed by the simulator, so results measure recoverability of the simulator's generative dynamics, not real-world human problem-solving quality. Offline benchmark metrics demonstrate whether mathematical collaborative filtering and regression engines can reconstruct controlled generative signals, not whether they transfer losslessly to unobserved human behavioral distributions.
+2. **Synthetic Benchmark Proxy**: The contest rating regressor estimates expected performance on a benchmark scale driven by observable submission intensity and accuracy features; it is a synthetic-benchmark proxy and not an official LeetCode contest rating. The model's empirical $R^2$ depends directly on the submission volume per user generated in the simulator.
+3. **Synthetic Population Domain Gap**: Offline models are trained on simulated Item Response Theory distributions. While behavioral archetypes mirror human practice patterns, synthetic data cannot replicate all human nuances (e.g., contest server outages, copying external solutions).
 4. **Cold-Start Boundary for ALS**: The closed-form fold-in requires $\ge 3$ unique attempted questions to construct a stable collaborative vector. Users with fewer interactions rely on content-based similarity and weakness boosting.
-5. **Catalog Scope**: Problem recommendations and semantic search operate within the canonical catalog. Questions outside this set are aligned via slug matching or topic tag projection.
+5. **Catalogue Scope**: Problem recommendations and semantic search operate within the 2,630 canonical questions derived from [`kaysss/leetcode-problem-set`](https://huggingface.co/datasets/kaysss/leetcode-problem-set) (MIT License). Questions outside this set are aligned via slug matching or topic tag projection.
 
 ---
 

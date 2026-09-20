@@ -50,6 +50,7 @@ import config
 from data_processing import (
     FeatureEngineer,
     compute_user_topic_profile,
+    generate_synthetic_dataset_v3,
     generate_synthetic_submissions,
     generate_synthetic_users,
     load_canonical_questions,
@@ -155,18 +156,27 @@ def train_and_evaluate():
 
     # 3. Controlled Synthetic Multi-User Population Generation
     print("\n[3/7] Generating synthetic multi-user population with realistic archetypes...")
-    users_df, latent_info = generate_synthetic_users(
-        n=config.NUM_USERS,
-        random_seed=config.RANDOM_SEED,
-        return_latent_info=True,
-    )
-    submissions_df = generate_synthetic_submissions(
-        users_df=users_df,
-        questions_df=questions_df,
-        n_submissions=config.NUM_SUBMISSIONS,
-        random_seed=config.RANDOM_SEED,
-        latent_users_info=latent_info,
-    )
+    if config.CURRENT_PROFILE == "v3":
+        users_df, questions_df, submissions_df, latent_info = generate_synthetic_dataset_v3(
+            questions_df=questions_df,
+            n_users=config.NUM_USERS,
+            random_seed=config.RANDOM_SEED,
+            zipf_exponent=0.8,
+            beta=1.5,
+        )
+    else:
+        users_df, latent_info = generate_synthetic_users(
+            n=config.NUM_USERS,
+            random_seed=config.RANDOM_SEED,
+            return_latent_info=True,
+        )
+        submissions_df = generate_synthetic_submissions(
+            users_df=users_df,
+            questions_df=questions_df,
+            n_submissions=config.NUM_SUBMISSIONS,
+            random_seed=config.RANDOM_SEED,
+            latent_users_info=latent_info,
+        )
     print(f"  Generated {len(users_df)} synthetic users across {len(config.USER_ARCHETYPES)} archetypes.")
     print(f"  Generated {len(submissions_df)} simulated submission logs.")
 
@@ -252,9 +262,22 @@ def train_and_evaluate():
     print(f"    F1 Score:  {weak_topic_eval.get('f1', 0):.4f}")
 
     # 8. Model Metadata Persistence
+    results_dir = ROOT_DIR / "results"
+    s3_path = results_dir / "s3.json"
+    rating_baselines_path = results_dir / "rating_model_baselines.json"
+    weak_baselines_path = results_dir / "weak_topic_baselines.json"
+    tuning_path = results_dir / "chosen_config.json"
+
+    s3_data = json.loads(s3_path.read_text(encoding="utf-8")) if s3_path.exists() else {}
+    rating_baselines = json.loads(rating_baselines_path.read_text(encoding="utf-8")) if rating_baselines_path.exists() else {}
+    weak_baselines = json.loads(weak_baselines_path.read_text(encoding="utf-8")) if weak_baselines_path.exists() else {}
+    tuning_data = json.loads(tuning_path.read_text(encoding="utf-8")) if tuning_path.exists() else {}
+
     metadata = {
-        "model_version": "2.0.0",
-        "training_dataset_version": "synthetic_archetypes_v2",
+        "model_version": "3.0.0",
+        "dataset_version": "kaysss_leetcode_canonical_v3",
+        "generator_version": config.CURRENT_PROFILE,
+        "catalogue_source": "Hugging Face kaysss/leetcode-problem-set (MIT License)",
         "training_timestamp": datetime.now(timezone.utc).isoformat(),
         "random_seed": config.RANDOM_SEED,
         "n_synthetic_users": len(users_df),
@@ -278,6 +301,24 @@ def train_and_evaluate():
             "content_weight": config.HYBRID_CONTENT_WEIGHT,
             "weakness_weight": config.HYBRID_WEAKNESS_WEIGHT,
         },
+        "live_test_evaluation": {
+            "rating_model_test": {
+                "rmse": round(test_metrics["rmse"], 2),
+                "mae": round(test_metrics["mae"], 2),
+                "r2": round(test_metrics["r2"], 3),
+            },
+            "recommendation_test": {
+                "precision_at_5": round(rec_eval.get("precision@5", 0.0), 4),
+                "recall_at_5": round(rec_eval.get("recall@5", 0.0), 4),
+                "hit_rate_at_5": round(rec_eval.get("hit_rate@5", 0.0), 4),
+                "ndcg_at_5": round(rec_eval.get("ndcg@5", 0.0), 4),
+            },
+            "weak_topic_detection_test": {
+                "precision": round(weak_topic_eval.get("precision", 0.0), 4),
+                "recall": round(weak_topic_eval.get("recall", 0.0), 4),
+                "f1": round(weak_topic_eval.get("f1", 0.0), 4),
+            },
+        },
         "evaluation_metrics": {
             "rating_model_test": {
                 "rmse": round(test_metrics["rmse"], 2),
@@ -296,6 +337,17 @@ def train_and_evaluate():
                 "f1": round(weak_topic_eval.get("f1", 0.0), 4),
             },
         },
+        "benchmark_10_seeds": {
+            "setting": "S3 (generator v3, 2630 canonical catalogue, 2000 users)",
+            "recommendation_methods": s3_data.get("methods", {}),
+            "recommendation_paired_differences": s3_data.get("paired_differences", {}),
+            "head_vs_tail": s3_data.get("head_vs_tail", {}),
+        },
+        "baselines_10_seeds": {
+            "rating_model": rating_baselines.get("models", {}),
+            "weak_topic_detection": weak_baselines.get("methods", {}),
+        },
+        "tuning_summary": tuning_data,
         "environment": {
             "xgboost": xgboost.__version__,
             "scikit_learn": sklearn.__version__,
