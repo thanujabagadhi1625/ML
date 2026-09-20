@@ -1,0 +1,90 @@
+{
+  "chosen_als_params": {
+    "n_factors": 16,
+    "alpha": 5.0,
+    "reg_lambda": 50.0,
+    "n_epochs": 15
+  },
+  "chosen_hybrid_weights": {
+    "cf_weight": 1.0,
+    "content_weight": 0.0,
+    "weakness_weight": 0.0
+  },
+  "validation_tuning_summary": {
+    "val_ndcg@10_als_only": 0.12147,
+    "val_ndcg@10_hybrid": 0.10745,
+    "seeds_used": [
+      1,
+      2,
+      3
+    ],
+    "split": "validation_users_only"
+  },
+  "test_evaluation_summary": {
+    "evaluated_users_total": 895,
+    "hybrid_precision@5": {
+      "mean": 0.10188,
+      "std": 0.01141,
+      "ci_95": [
+        0.09274,
+        0.11084
+      ]
+    },
+    "hybrid_ndcg@10": {
+      "mean": 0.11345,
+      "std": 0.01055,
+      "ci_95": [
+        0.1042,
+        0.1229
+      ]
+    },
+    "hybrid_weak_coverage@5": {
+      "mean": 0.79213,
+      "std": 0.01889,
+      "ci_95": [
+        0.77408,
+        0.81006
+      ]
+    },
+    "hybrid_difficulty_fit@5": {
+      "mean": 0.92578,
+      "std": 0.0112,
+      "ci_95": [
+        0.91397,
+        0.93677
+      ]
+    },
+    "popularity_precision@5": {
+      "mean": 0.08869,
+      "std": 0.01196,
+      "ci_95": [
+        0.08,
+        0.09698
+      ]
+    },
+    "als_only_precision@5": {
+      "mean": 0.1059,
+      "std": 0.01309,
+      "ci_95": [
+        0.09654,
+        0.11508
+      ]
+    },
+    "hybrid_minus_popularity_p@5": {
+      "mean": 0.01319,
+      "std": 0.00374,
+      "ci_95": [
+        0.00581,
+        0.02078
+      ]
+    },
+    "hybrid_minus_als_only_p@5": {
+      "mean": -0.00401,
+      "std": 0.00354,
+      "ci_95": [
+        -0.00961,
+        0.00134
+      ]
+    }
+  }
+}

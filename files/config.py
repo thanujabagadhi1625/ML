@@ -134,7 +134,7 @@ MF_CONFIDENCE_ALPHA = 15.0      # implicit-feedback confidence scaling
 MF_EPOCHS = 15
 TOP_N_RECOMMENDATIONS = 5
 
-# Recommendation score blending weights (tuned on validation users)
+# Recommendation score blending weights (tuned on validation users; see results/tuning.json and results/chosen_config.json)
 HYBRID_CF_WEIGHT = 0.50          # collaborative filtering weight
 HYBRID_CONTENT_WEIGHT = 0.30     # content similarity weight
 HYBRID_WEAKNESS_WEIGHT = 0.20    # topic weakness boost weight
