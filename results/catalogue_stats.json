@@ -1,0 +1,106 @@
+{
+  "rows_read": 3511,
+  "rows_after_dropping_paid": 2800,
+  "rows_dropped_no_mappable_tag": 170,
+  "drop_ratio_percent": 6.07,
+  "total_canonical_questions": 2630,
+  "counts_per_difficulty": {
+    "Medium": 1343,
+    "Easy": 650,
+    "Hard": 637
+  },
+  "counts_per_canonical_tag": {
+    "Array": 1610,
+    "Dynamic Programming": 503,
+    "Breadth-First Search": 192,
+    "Binary Search": 258,
+    "Stack": 151,
+    "Math": 496,
+    "Backtracking": 88,
+    "Two Pointers": 181,
+    "Sorting": 393,
+    "Hash Table": 580,
+    "String": 676,
+    "Depth-First Search": 239,
+    "Union Find": 68,
+    "Bit Manipulation": 208,
+    "Graph": 128,
+    "Greedy": 363,
+    "Tree": 181,
+    "Sliding Window": 129,
+    "Heap": 164,
+    "Trie": 44
+  },
+  "tags_per_question_distribution": {
+    "1": 461,
+    "2": 954,
+    "3": 742,
+    "4": 342,
+    "5": 101,
+    "6": 26,
+    "7": 4
+  },
+  "average_tags_per_question": 2.53,
+  "top_15_unmapped_tags": [
+    {
+      "tag": "Matrix",
+      "count": 212
+    },
+    {
+      "tag": "Prefix Sum",
+      "count": 181
+    },
+    {
+      "tag": "Simulation",
+      "count": 164
+    },
+    {
+      "tag": "Counting",
+      "count": 141
+    },
+    {
+      "tag": "Enumeration",
+      "count": 109
+    },
+    {
+      "tag": "Design",
+      "count": 94
+    },
+    {
+      "tag": "Database",
+      "count": 86
+    },
+    {
+      "tag": "Linked List",
+      "count": 66
+    },
+    {
+      "tag": "Ordered Set",
+      "count": 56
+    },
+    {
+      "tag": "Segment Tree",
+      "count": 52
+    },
+    {
+      "tag": "Divide and Conquer",
+      "count": 41
+    },
+    {
+      "tag": "Memoization",
+      "count": 41
+    },
+    {
+      "tag": "Recursion",
+      "count": 39
+    },
+    {
+      "tag": "Queue",
+      "count": 38
+    },
+    {
+      "tag": "String Matching",
+      "count": 32
+    }
+  ]
+}

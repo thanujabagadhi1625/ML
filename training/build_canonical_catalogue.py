@@ -1,17 +1,28 @@
 """
-build_canonical_catalogue.py
-----------------------------
-Builds the single source of truth canonical question catalogue (`models/canonical_questions.json`).
-Integrates real problems from sync_store / demo datasets with standard LeetCode reference
-problems covering all 20 canonical topic tags across Easy, Medium, and Hard difficulties.
+training/build_canonical_catalogue.py
+------------------------------------
+Builds the canonical question catalogue from data/leetcode_problems.csv:
+- Drops paid-only questions.
+- Maps source topic tags to the 20 canonical tags using an explicit mapping table.
+- Drops questions with no mappable tag (never defaults to 'Array').
+- Removes ingestion from sync_store.json / demo files / placeholder generated questions.
+- Sets description = title when real problem statement text is not present.
+- Prints detailed catalogue stats and saves to results/catalogue_stats.json.
+- Writes models/canonical_questions.json and regenerates models/question_embeddings.npy.
+- Validates that demo file problem slugs map without error.
 """
 
 from __future__ import annotations
 
+import ast
 import json
-import re
 import sys
+from collections import Counter
 from pathlib import Path
+from typing import Any, Dict, List
+
+import numpy as np
+import pandas as pd
 
 # Add files directory to sys.path
 FILES_DIR = Path(__file__).resolve().parent.parent / "files"
@@ -19,199 +30,222 @@ if str(FILES_DIR) not in sys.path:
     sys.path.insert(0, str(FILES_DIR))
 
 import config
-from data_processing import _infer_topic_tags_from_slug_or_title, _parse_topic_tags
+from nlp_cluster import WeakTopicAnalyzer
 
+CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "leetcode_problems.csv"
 CANONICAL_OUTPUT = config.CANONICAL_QUESTIONS_PATH
+STATS_OUTPUT = Path(__file__).resolve().parent.parent / "results" / "catalogue_stats.json"
 
-# Well-known reference LeetCode questions to ensure rich coverage across every topic & difficulty
-REFERENCE_QUESTIONS = [
-    # Dynamic Programming
-    {"slug": "climbing-stairs", "title": "Climbing Stairs", "difficulty": "Easy", "topic_tags": ["Dynamic Programming", "Math"], "acceptance_rate": 0.52},
-    {"slug": "coin-change", "title": "Coin Change", "difficulty": "Medium", "topic_tags": ["Dynamic Programming", "Breadth-First Search"], "acceptance_rate": 0.43},
-    {"slug": "longest-increasing-subsequence", "title": "Longest Increasing Subsequence", "difficulty": "Medium", "topic_tags": ["Dynamic Programming", "Binary Search", "Array"], "acceptance_rate": 0.54},
-    {"slug": "edit-distance", "title": "Edit Distance", "difficulty": "Hard", "topic_tags": ["Dynamic Programming", "String"], "acceptance_rate": 0.55},
-    {"slug": "trapping-rain-water", "title": "Trapping Rain Water", "difficulty": "Hard", "topic_tags": ["Two Pointers", "Dynamic Programming", "Stack"], "acceptance_rate": 0.60},
-    {"slug": "maximum-subarray", "title": "Maximum Subarray", "difficulty": "Medium", "topic_tags": ["Array", "Dynamic Programming"], "acceptance_rate": 0.51},
-    {"slug": "house-robber", "title": "House Robber", "difficulty": "Medium", "topic_tags": ["Array", "Dynamic Programming"], "acceptance_rate": 0.50},
-    {"slug": "house-robber-ii", "title": "House Robber II", "difficulty": "Medium", "topic_tags": ["Array", "Dynamic Programming"], "acceptance_rate": 0.42},
-    {"slug": "word-break", "title": "Word Break", "difficulty": "Medium", "topic_tags": ["Dynamic Programming", "Hash Table", "Trie"], "acceptance_rate": 0.46},
-    {"slug": "partition-equal-subset-sum", "title": "Partition Equal Subset Sum", "difficulty": "Medium", "topic_tags": ["Dynamic Programming", "Array"], "acceptance_rate": 0.47},
-    {"slug": "burst-balloons", "title": "Burst Balloons", "difficulty": "Hard", "topic_tags": ["Dynamic Programming", "Array"], "acceptance_rate": 0.58},
+# Explicit source-to-canonical tag mapping table
+# Canonical tags: config.TOPIC_TAGS (20 canonical tags)
+EXPLICIT_TAG_MAP: Dict[str, str] = {
+    # Direct 1-to-1 matches
+    "Array": "Array",
+    "String": "String",
+    "Hash Table": "Hash Table",
+    "Dynamic Programming": "Dynamic Programming",
+    "Math": "Math",
+    "Sorting": "Sorting",
+    "Greedy": "Greedy",
+    "Depth-First Search": "Depth-First Search",
+    "Breadth-First Search": "Breadth-First Search",
+    "Binary Search": "Binary Search",
+    "Tree": "Tree",
+    "Graph": "Graph",
+    "Two Pointers": "Two Pointers",
+    "Sliding Window": "Sliding Window",
+    "Backtracking": "Backtracking",
+    "Bit Manipulation": "Bit Manipulation",
+    "Heap": "Heap",
+    "Stack": "Stack",
+    "Trie": "Trie",
+    "Union Find": "Union Find",
 
-    # Graph, DFS, BFS
-    {"slug": "course-schedule", "title": "Course Schedule", "difficulty": "Medium", "topic_tags": ["Graph", "Depth-First Search", "Breadth-First Search"], "acceptance_rate": 0.47},
-    {"slug": "course-schedule-ii", "title": "Course Schedule II", "difficulty": "Medium", "topic_tags": ["Graph", "Depth-First Search", "Breadth-First Search"], "acceptance_rate": 0.50},
-    {"slug": "number-of-islands", "title": "Number of Islands", "difficulty": "Medium", "topic_tags": ["Graph", "Breadth-First Search", "Depth-First Search", "Union Find"], "acceptance_rate": 0.58},
-    {"slug": "clone-graph", "title": "Clone Graph", "difficulty": "Medium", "topic_tags": ["Hash Table", "Depth-First Search", "Breadth-First Search", "Graph"], "acceptance_rate": 0.55},
-    {"slug": "word-ladder", "title": "Word Ladder", "difficulty": "Hard", "topic_tags": ["Hash Table", "String", "Breadth-First Search"], "acceptance_rate": 0.38},
-    {"slug": "network-delay-time", "title": "Network Delay Time", "difficulty": "Medium", "topic_tags": ["Depth-First Search", "Breadth-First Search", "Graph", "Heap"], "acceptance_rate": 0.53},
-    {"slug": "cheapest-flights-within-k-stops", "title": "Cheapest Flights Within K Stops", "difficulty": "Medium", "topic_tags": ["Dynamic Programming", "Depth-First Search", "Breadth-First Search", "Graph"], "acceptance_rate": 0.38},
-    {"slug": "alien-dictionary", "title": "Alien Dictionary", "difficulty": "Hard", "topic_tags": ["Array", "String", "Depth-First Search", "Breadth-First Search", "Graph"], "acceptance_rate": 0.35},
+    # Explicit mappings required by spec
+    "Heap (Priority Queue)": "Heap",
+    "Binary Tree": "Tree",
+    "Binary Search Tree": "Tree",
+    "Monotonic Stack": "Stack",
+    "Merge Sort": "Sorting",
 
-    # Trees, BST
-    {"slug": "maximum-depth-of-binary-tree", "title": "Maximum Depth of Binary Tree", "difficulty": "Easy", "topic_tags": ["Tree", "Depth-First Search", "Breadth-First Search"], "acceptance_rate": 0.75},
-    {"slug": "invert-binary-tree", "title": "Invert Binary Tree", "difficulty": "Easy", "topic_tags": ["Tree", "Depth-First Search", "Breadth-First Search"], "acceptance_rate": 0.77},
-    {"slug": "validate-binary-search-tree", "title": "Validate Binary Search Tree", "difficulty": "Medium", "topic_tags": ["Tree", "Depth-First Search", "Binary Search"], "acceptance_rate": 0.33},
-    {"slug": "lowest-common-ancestor-of-a-binary-tree", "title": "Lowest Common Ancestor of a Binary Tree", "difficulty": "Medium", "topic_tags": ["Tree", "Depth-First Search"], "acceptance_rate": 0.61},
-    {"slug": "binary-tree-maximum-path-sum", "title": "Binary Tree Maximum Path Sum", "difficulty": "Hard", "topic_tags": ["Dynamic Programming", "Tree", "Depth-First Search"], "acceptance_rate": 0.40},
-    {"slug": "serialize-and-deserialize-binary-tree", "title": "Serialize and Deserialize Binary Tree", "difficulty": "Hard", "topic_tags": ["String", "Tree", "Depth-First Search", "Breadth-First Search"], "acceptance_rate": 0.56},
-
-    # Backtracking
-    {"slug": "subsets", "title": "Subsets", "difficulty": "Medium", "topic_tags": ["Array", "Backtracking", "Bit Manipulation"], "acceptance_rate": 0.77},
-    {"slug": "permutations", "title": "Permutations", "difficulty": "Medium", "topic_tags": ["Array", "Backtracking"], "acceptance_rate": 0.78},
-    {"slug": "combination-sum", "title": "Combination Sum", "difficulty": "Medium", "topic_tags": ["Array", "Backtracking"], "acceptance_rate": 0.70},
-    {"slug": "generate-parentheses", "title": "Generate Parentheses", "difficulty": "Medium", "topic_tags": ["String", "Dynamic Programming", "Backtracking"], "acceptance_rate": 0.74},
-    {"slug": "n-queens", "title": "N-Queens", "difficulty": "Hard", "topic_tags": ["Array", "Backtracking"], "acceptance_rate": 0.67},
-    {"slug": "word-search", "title": "Word Search", "difficulty": "Medium", "topic_tags": ["Array", "Backtracking", "Matrix"], "acceptance_rate": 0.42},
-    {"slug": "sudoku-solver", "title": "Sudoku Solver", "difficulty": "Hard", "topic_tags": ["Array", "Hash Table", "Backtracking", "Matrix"], "acceptance_rate": 0.60},
-
-    # Sliding Window & Two Pointers
-    {"slug": "longest-substring-without-repeating-characters", "title": "Longest Substring Without Repeating Characters", "difficulty": "Medium", "topic_tags": ["Hash Table", "String", "Sliding Window"], "acceptance_rate": 0.35},
-    {"slug": "minimum-window-substring", "title": "Minimum Window Substring", "difficulty": "Hard", "topic_tags": ["Hash Table", "String", "Sliding Window"], "acceptance_rate": 0.42},
-    {"slug": "sliding-window-maximum", "title": "Sliding Window Maximum", "difficulty": "Hard", "topic_tags": ["Array", "Queue", "Sliding Window", "Heap"], "acceptance_rate": 0.47},
-    {"slug": "container-with-most-water", "title": "Container With Most Water", "difficulty": "Medium", "topic_tags": ["Array", "Two Pointers", "Greedy"], "acceptance_rate": 0.55},
-    {"slug": "two-sum", "title": "Two Sum", "difficulty": "Easy", "topic_tags": ["Array", "Hash Table"], "acceptance_rate": 0.51},
-    {"slug": "3sum", "title": "3Sum", "difficulty": "Medium", "topic_tags": ["Array", "Two Pointers", "Sorting"], "acceptance_rate": 0.34},
-
-    # Binary Search
-    {"slug": "binary-search", "title": "Binary Search", "difficulty": "Easy", "topic_tags": ["Array", "Binary Search"], "acceptance_rate": 0.57},
-    {"slug": "search-in-rotated-sorted-array", "title": "Search in Rotated Sorted Array", "difficulty": "Medium", "topic_tags": ["Array", "Binary Search"], "acceptance_rate": 0.40},
-    {"slug": "find-minimum-in-rotated-sorted-array", "title": "Find Minimum in Rotated Sorted Array", "difficulty": "Medium", "topic_tags": ["Array", "Binary Search"], "acceptance_rate": 0.50},
-    {"slug": "median-of-two-sorted-arrays", "title": "Median of Two Sorted Arrays", "difficulty": "Hard", "topic_tags": ["Array", "Binary Search"], "acceptance_rate": 0.39},
-
-    # Heap & Stack
-    {"slug": "kth-largest-element-in-an-array", "title": "Kth Largest Element in an Array", "difficulty": "Medium", "topic_tags": ["Array", "Sorting", "Heap"], "acceptance_rate": 0.67},
-    {"slug": "merge-k-sorted-lists", "title": "Merge k Sorted Lists", "difficulty": "Hard", "topic_tags": ["Linked List", "Heap", "Divide and Conquer"], "acceptance_rate": 0.52},
-    {"slug": "find-median-from-data-stream", "title": "Find Median from Data Stream", "difficulty": "Hard", "topic_tags": ["Two Pointers", "Sorting", "Heap"], "acceptance_rate": 0.52},
-    {"slug": "valid-parentheses", "title": "Valid Parentheses", "difficulty": "Easy", "topic_tags": ["String", "Stack"], "acceptance_rate": 0.41},
-    {"slug": "daily-temperatures", "title": "Daily Temperatures", "difficulty": "Medium", "topic_tags": ["Array", "Stack", "Monotonic Stack"], "acceptance_rate": 0.66},
-    {"slug": "largest-rectangle-in-histogram", "title": "Largest Rectangle in Histogram", "difficulty": "Hard", "topic_tags": ["Array", "Stack", "Monotonic Stack"], "acceptance_rate": 0.44},
-
-    # Trie & Union Find
-    {"slug": "implement-trie-prefix-tree", "title": "Implement Trie (Prefix Tree)", "difficulty": "Medium", "topic_tags": ["Hash Table", "String", "Trie"], "acceptance_rate": 0.64},
-    {"slug": "word-search-ii", "title": "Word Search II", "difficulty": "Hard", "topic_tags": ["Array", "String", "Backtracking", "Trie"], "acceptance_rate": 0.36},
-    {"slug": "redundant-connection", "title": "Redundant Connection", "difficulty": "Medium", "topic_tags": ["Depth-First Search", "Breadth-First Search", "Union Find", "Graph"], "acceptance_rate": 0.63},
-    {"slug": "number-of-provinces", "title": "Number of Provinces", "difficulty": "Medium", "topic_tags": ["Depth-First Search", "Breadth-First Search", "Union Find", "Graph"], "acceptance_rate": 0.66},
-
-    # Bit Manipulation & Math
-    {"slug": "number-of-1-bits", "title": "Number of 1 Bits", "difficulty": "Easy", "topic_tags": ["Bit Manipulation", "Math"], "acceptance_rate": 0.70},
-    {"slug": "counting-bits", "title": "Counting Bits", "difficulty": "Easy", "topic_tags": ["Dynamic Programming", "Bit Manipulation"], "acceptance_rate": 0.78},
-    {"slug": "reverse-bits", "title": "Reverse Bits", "difficulty": "Easy", "topic_tags": ["Bit Manipulation", "Divide and Conquer"], "acceptance_rate": 0.58},
-    {"slug": "single-number", "title": "Single Number", "difficulty": "Easy", "topic_tags": ["Array", "Bit Manipulation"], "acceptance_rate": 0.72},
-    {"slug": "sum-of-two-integers", "title": "Sum of Two Integers", "difficulty": "Medium", "topic_tags": ["Math", "Bit Manipulation"], "acceptance_rate": 0.51},
-]
-
-
-def _generate_problem_description(title: str, difficulty: str, topic_tags: list[str]) -> str:
-    tags_str = ", ".join(topic_tags) if topic_tags else "algorithms"
-    diff_lower = difficulty.lower()
-    return (
-        f"Given a problem instance for '{title}', design an optimal {diff_lower}-difficulty algorithm "
-        f"leveraging {tags_str}. The solution must optimize runtime complexity within platform memory bounds "
-        f"and handle edge cases such as empty inputs, boundary constraints, and duplicate elements."
-    )
+    # Additional algorithmic variants
+    "Quickselect": "Sorting",
+    "Bucket Sort": "Sorting",
+    "Radix Sort": "Sorting",
+    "Counting Sort": "Sorting",
+    "Monotonic Queue": "Stack",
+    "Disjoint Set": "Union Find",
+    "Minimum Spanning Tree": "Graph",
+    "Shortest Path": "Graph",
+    "Eulerian Circuit": "Graph",
+    "Strongly Connected Component": "Graph",
+    "Biconnected Component": "Graph",
+    "Topological Sort": "Graph",
+    "Bitmask": "Bit Manipulation",
+    "Combinatorics": "Math",
+    "Geometry": "Math",
+    "Game Theory": "Math",
+    "Probability and Statistics": "Math",
+    "Number Theory": "Math",
+}
 
 
 def build_canonical_catalogue() -> list[dict]:
-    catalogue_map: dict[str, dict] = {}
+    if not CSV_PATH.exists():
+        raise FileNotFoundError(
+            f"Required catalogue dataset not found at '{CSV_PATH}'. "
+            "Please ensure data/leetcode_problems.csv exists before running."
+        )
 
-    def add_question(slug: str, title: str, difficulty: str, tags: list[str], acc_rate: float | None = None):
-        slug = slug.strip().lower()
-        if not slug:
-            return
-        if slug in catalogue_map:
-            # Update missing fields if available
-            existing = catalogue_map[slug]
-            if not existing["topic_tags"] and tags:
-                existing["topic_tags"] = tags
-            return
+    print(f"Reading {CSV_PATH} ...")
+    raw_df = pd.read_csv(CSV_PATH)
+    rows_read = len(raw_df)
+    print(f"1. Rows read: {rows_read}")
 
-        clean_tags = []
-        for t in tags:
-            for canon in config.TOPIC_TAGS:
-                if canon.lower() == t.lower() or (t.lower() in canon.lower() and len(t) > 3):
-                    if canon not in clean_tags:
-                        clean_tags.append(canon)
-        if not clean_tags:
-            clean_tags = _infer_topic_tags_from_slug_or_title(slug, title)
-            clean_tags = [t for t in clean_tags if t in config.TOPIC_TAGS]
-        if not clean_tags:
-            clean_tags = ["Array"]
+    # Drop paidOnly questions
+    non_paid_df = raw_df[~raw_df["paidOnly"].astype(bool)].copy()
+    rows_after_dropping_paid = len(non_paid_df)
+    print(f"2. Rows after dropping paid-only: {rows_after_dropping_paid}")
 
+    # Process and map tags
+    catalogue_items = []
+    unmapped_tag_counter = Counter()
+    dropped_no_mappable_tag = 0
+
+    seen_slugs = set()
+
+    for _, row in non_paid_df.iterrows():
+        raw_slug = str(row.get("titleSlug") or "").strip().lower()
+        if not raw_slug or raw_slug in seen_slugs:
+            continue
+
+        raw_title = str(row.get("title") or raw_slug.replace("-", " ").title()).strip()
+        difficulty = str(row.get("difficulty") or "Medium").strip().capitalize()
         if difficulty not in config.DIFFICULTIES:
             difficulty = "Medium"
 
-        if acc_rate is None:
-            base_acc = 0.70 if difficulty == "Easy" else 0.48 if difficulty == "Medium" else 0.32
-            acc_rate = round(base_acc, 2)
+        # acRate is a percentage in CSV (e.g. 55.32 -> 0.5532)
+        raw_ac = row.get("acRate")
+        if pd.notna(raw_ac):
+            acc_rate = round(float(raw_ac) / 100.0, 4)
+        else:
+            acc_rate = 0.50
 
-        desc = _generate_problem_description(title, difficulty, clean_tags)
-        catalogue_map[slug] = {
-            "slug": slug,
-            "title": title,
-            "difficulty": difficulty,
-            "topic_tags": clean_tags,
-            "acceptance_rate": acc_rate,
-            "description": desc,
-        }
+        # Parse tags using ast.literal_eval
+        raw_tags_str = row.get("topicTags")
+        mapped_tags = []
+        if pd.notna(raw_tags_str):
+            try:
+                parsed_tags = ast.literal_eval(str(raw_tags_str))
+                for t in parsed_tags:
+                    t_clean = str(t).strip()
+                    if t_clean in EXPLICIT_TAG_MAP:
+                        canon_tag = EXPLICIT_TAG_MAP[t_clean]
+                        if canon_tag not in mapped_tags and canon_tag in config.TOPIC_TAGS:
+                            mapped_tags.append(canon_tag)
+                    else:
+                        unmapped_tag_counter[t_clean] += 1
+            except Exception:
+                pass
 
-    # 1. Add well-known reference questions first
-    for ref in REFERENCE_QUESTIONS:
-        add_question(ref["slug"], ref["title"], ref["difficulty"], ref["topic_tags"], ref.get("acceptance_rate"))
-
-    # 2. Ingest from sync_store.json and large_user.json
-    sync_p = config.FILES_DIR / "sync_store.json"
-    demo_p = config.FILES_DIR / "demo" / "large_user.json"
-
-    all_subs = []
-    if sync_p.exists():
-        try:
-            for acc in json.loads(sync_p.read_text(encoding="utf-8")).values():
-                all_subs.extend(acc.get("submissions", []))
-        except Exception:
-            pass
-
-    if demo_p.exists():
-        try:
-            all_subs.extend(json.loads(demo_p.read_text(encoding="utf-8")).get("submissions", []))
-        except Exception:
-            pass
-
-    for s in all_subs:
-        slug = str(s.get("problem_slug") or s.get("question_id") or "").strip().lower()
-        if not slug or slug.isdigit():
+        if not mapped_tags:
+            # Dropped because no tags map to canonical 20 tags
+            dropped_no_mappable_tag += 1
             continue
-        title = s.get("problem_title") or s.get("title") or slug.replace("-", " ").title()
-        diff = s.get("difficulty", "Medium")
-        raw_tags = s.get("topics") or []
-        add_question(slug, title, diff, raw_tags)
 
-    # 3. Ensure we have at least 450 canonical questions covering all topics
-    # Generate canonical topic-focused questions if needed
-    needed = max(0, config.NUM_QUESTIONS - len(catalogue_map))
-    if needed > 0:
-        idx = 1
-        for topic in config.TOPIC_TAGS:
-            for diff in config.DIFFICULTIES:
-                slug = f"canonical-{topic.lower().replace(' ', '-')}-{diff.lower()}-{idx}"
-                title = f"{topic} Mastery {diff} {idx}"
-                add_question(slug, title, diff, [topic])
-                idx += 1
-                if len(catalogue_map) >= config.NUM_QUESTIONS:
-                    break
-            if len(catalogue_map) >= config.NUM_QUESTIONS:
-                break
+        seen_slugs.add(raw_slug)
+        catalogue_items.append({
+            "slug": raw_slug,
+            "title": raw_title,
+            "difficulty": difficulty,
+            "topic_tags": mapped_tags,
+            "acceptance_rate": acc_rate,
+            "description": raw_title,  # Real title used as description
+        })
 
-    # 4. Assign consistent 1-indexed question_id
-    catalogue_list = []
-    for qid, (slug, item) in enumerate(sorted(catalogue_map.items()), start=1):
+    drop_ratio = dropped_no_mappable_tag / max(rows_after_dropping_paid, 1)
+    print(f"3. Rows dropped for no mappable tag: {dropped_no_mappable_tag} ({drop_ratio * 100:.2f}%)")
+
+    top_15_unmapped = [
+        {"tag": tag, "count": count}
+        for tag, count in unmapped_tag_counter.most_common(15)
+    ]
+    print("\n4. Top 15 most frequent unmapped tags:")
+    for item in top_15_unmapped:
+        print(f"   - {item['tag']}: {item['count']}")
+
+    if drop_ratio > 0.30:
+        raise RuntimeError(
+            f"ABORT: {drop_ratio * 100:.2f}% of non-paid questions would be dropped (> 30% limit). "
+            f"Dropped {dropped_no_mappable_tag}/{rows_after_dropping_paid}."
+        )
+
+    # Assign consistent 1-indexed question_id sorted by slug
+    catalogue_items.sort(key=lambda x: x["slug"])
+    for qid, item in enumerate(catalogue_items, start=1):
         item["question_id"] = qid
-        catalogue_list.append(item)
 
+    total_questions = len(catalogue_items)
+    difficulty_counts = Counter(item["difficulty"] for item in catalogue_items)
+    tag_counts = Counter(tag for item in catalogue_items for tag in item["topic_tags"])
+    tags_per_question_list = [len(item["topic_tags"]) for item in catalogue_items]
+    tags_per_question_dist = Counter(tags_per_question_list)
+    avg_tags_per_question = float(np.mean(tags_per_question_list))
+
+    print(f"\n5. Final catalogue size: {total_questions} questions")
+    print(f"   Difficulty distribution: {dict(difficulty_counts)}")
+    print(f"   Average tags per question: {avg_tags_per_question:.2f}")
+
+    # Build stats dictionary
+    stats = {
+        "rows_read": rows_read,
+        "rows_after_dropping_paid": rows_after_dropping_paid,
+        "rows_dropped_no_mappable_tag": dropped_no_mappable_tag,
+        "drop_ratio_percent": round(drop_ratio * 100.0, 2),
+        "total_canonical_questions": total_questions,
+        "counts_per_difficulty": dict(difficulty_counts),
+        "counts_per_canonical_tag": dict(tag_counts),
+        "tags_per_question_distribution": {str(k): v for k, v in sorted(tags_per_question_dist.items())},
+        "average_tags_per_question": round(avg_tags_per_question, 2),
+        "top_15_unmapped_tags": top_15_unmapped,
+    }
+
+    STATS_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    STATS_OUTPUT.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    print(f"Saved catalogue stats to {STATS_OUTPUT}")
+
+    # Write canonical questions
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    CANONICAL_OUTPUT.write_text(json.dumps(catalogue_list, indent=2), encoding="utf-8")
-    print(f"Successfully generated {len(catalogue_list)} canonical questions at {CANONICAL_OUTPUT}")
-    return catalogue_list
+    CANONICAL_OUTPUT.write_text(json.dumps(catalogue_items, indent=2), encoding="utf-8")
+    print(f"Saved {len(catalogue_items)} canonical questions to {CANONICAL_OUTPUT}")
+
+    # Regenerate question embeddings
+    print("\nRegenerating models/question_embeddings.npy ...")
+    analyzer = WeakTopicAnalyzer()
+    descriptions = [item["description"] for item in catalogue_items]
+    embeddings = analyzer.embed_descriptions(descriptions)
+    np.save(config.QUESTION_EMBEDDINGS_PATH, embeddings)
+    print(f"Saved question embeddings of shape {embeddings.shape} to {config.QUESTION_EMBEDDINGS_PATH}")
+
+    # Validate demo file and fold-in mapping
+    demo_path = config.FILES_DIR / "demo" / "large_user.json"
+    if demo_path.exists():
+        demo_data = json.loads(demo_path.read_text(encoding="utf-8"))
+        demo_subs = demo_data.get("submissions", [])
+        demo_slugs = {s.get("problem_slug") or s.get("question_id") for s in demo_subs}
+        cat_slugs = {item["slug"] for item in catalogue_items}
+        matched = demo_slugs.intersection(cat_slugs)
+        unmatched = demo_slugs - cat_slugs
+        print(f"\nDemo File Mapping Verification:")
+        print(f"  Total unique demo problem slugs: {len(demo_slugs)}")
+        print(f"  Successfully matched in catalogue: {len(matched)}")
+        print(f"  Unmatched demo slugs: {len(unmatched)} {unmatched}")
+        if unmatched:
+            print(f"  Warning: {len(unmatched)} demo slugs unmatched: {unmatched}")
+        else:
+            print("  All demo slugs successfully mapped to catalogue without errors.")
+
+    return catalogue_items
 
 
 if __name__ == "__main__":
