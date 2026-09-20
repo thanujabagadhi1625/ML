@@ -1362,6 +1362,7 @@ def generate_synthetic_submissions_v3(
     questions_df: pd.DataFrame,
     random_seed: int = config.RANDOM_SEED,
     latent_users_info: pd.DataFrame | None = None,
+    zipf_exponent: float = 0.8,
     beta: float = 1.5,
     p_retry: float = 0.35,
     mean_submissions: float = 100.0,
@@ -1396,7 +1397,10 @@ def generate_synthetic_submissions_v3(
     # Universal long-tailed question popularity (Zipf distribution) fixed by seed
     pop_rng = np.random.default_rng(random_seed + 777)
     ranks = np.arange(1, n_questions + 1)
-    pop_weights = 1.0 / (ranks ** 0.8)
+    if zipf_exponent > 0:
+        pop_weights = 1.0 / (ranks ** zipf_exponent)
+    else:
+        pop_weights = np.ones(n_questions, dtype=float)
     pop_rng.shuffle(pop_weights)
     pop_weights /= pop_weights.sum()
 
@@ -1516,6 +1520,7 @@ def generate_synthetic_dataset_v3(
     questions_df: pd.DataFrame | None = None,
     n_users: int = 2000,
     random_seed: int = config.RANDOM_SEED,
+    zipf_exponent: float = 0.8,
     beta: float = 1.5,
     p_retry: float = 0.35,
     mean_submissions: float = 100.0,
@@ -1533,6 +1538,7 @@ def generate_synthetic_dataset_v3(
         questions_df=questions_df,
         random_seed=random_seed,
         latent_users_info=latent_df,
+        zipf_exponent=zipf_exponent,
         beta=beta,
         p_retry=p_retry,
         mean_submissions=mean_submissions,
