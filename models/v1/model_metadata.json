@@ -1,0 +1,80 @@
+{
+  "model_version": "2.0.0",
+  "training_dataset_version": "synthetic_archetypes_v2",
+  "training_timestamp": "2026-09-16T12:39:37.417081+00:00",
+  "random_seed": 42,
+  "n_synthetic_users": 600,
+  "n_questions": 453,
+  "n_submissions": 30000,
+  "user_split": {
+    "train_users": 420,
+    "val_users": 90,
+    "test_users": 90
+  },
+  "feature_names": [
+    "account_age_days",
+    "total_submissions",
+    "total_accepted",
+    "overall_accuracy",
+    "accuracy_easy",
+    "accuracy_hard",
+    "accuracy_medium",
+    "share_easy",
+    "share_hard",
+    "share_medium",
+    "recency_momentum",
+    "recent_submission_count",
+    "unique_problems_attempted",
+    "attempts_per_problem",
+    "failure_rate"
+  ],
+  "xgboost_hyperparameters": {
+    "n_estimators": 400,
+    "max_depth": 5,
+    "learning_rate": 0.03,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "objective": "reg:squarederror",
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "als_hyperparameters": {
+    "latent_dim": 24,
+    "reg_lambda": 20.0,
+    "confidence_alpha": 15.0,
+    "epochs": 15
+  },
+  "hybrid_blending_weights": {
+    "cf_weight": 0.5,
+    "content_weight": 0.3,
+    "weakness_weight": 0.2
+  },
+  "evaluation_metrics": {
+    "rating_model_test": {
+      "rmse": 177.29,
+      "mae": 136.23,
+      "r2": 0.43
+    },
+    "recommendation_test": {
+      "precision_at_5": 0.018,
+      "recall_at_5": 0.0217,
+      "hit_rate_at_5": 0.0899,
+      "ndcg_at_5": 0.0219
+    },
+    "weak_topic_detection_test": {
+      "precision": 0.624,
+      "recall": 0.4962,
+      "f1": 0.5056
+    }
+  },
+  "environment": {
+    "xgboost": "3.4.0",
+    "scikit_learn": "1.9.0",
+    "torch": "2.13.0+cpu",
+    "numpy": "2.5.2",
+    "pandas": "3.0.5"
+  },
+  "disclaimer": "This model was trained on a controlled synthetic multi-user population. Real-world generalization to live LeetCode contest ratings is benchmark evidence and has not been verified on real labeled multi-user contest datasets."
+}

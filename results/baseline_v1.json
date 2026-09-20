@@ -1,0 +1,27 @@
+{
+  "model_version": "2.0.0",
+  "training_dataset_version": "synthetic_archetypes_v2",
+  "training_timestamp": "2026-09-16T12:39:37.417081+00:00",
+  "random_seed": 42,
+  "n_synthetic_users": 600,
+  "n_questions": 453,
+  "n_submissions": 30000,
+  "evaluation_metrics": {
+    "rating_model_test": {
+      "rmse": 177.29,
+      "mae": 136.23,
+      "r2": 0.43
+    },
+    "recommendation_test": {
+      "precision_at_5": 0.018,
+      "recall_at_5": 0.0217,
+      "hit_rate_at_5": 0.0899,
+      "ndcg_at_5": 0.0219
+    },
+    "weak_topic_detection_test": {
+      "precision": 0.624,
+      "recall": 0.4962,
+      "f1": 0.5056
+    }
+  }
+}

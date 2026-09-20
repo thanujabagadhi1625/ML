@@ -21,11 +21,46 @@ ALS_MODEL_PATH = MODELS_DIR / "als_model.npz"
 QUESTION_EMBEDDINGS_PATH = MODELS_DIR / "question_embeddings.npy"
 MODEL_METADATA_PATH = MODELS_DIR / "model_metadata.json"
 
+import pandas as pd
+
 # --------------------------------------------------------------------------
-# Reproducibility
+# Reproducibility & Profiles
 # --------------------------------------------------------------------------
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
+REFERENCE_DATE = pd.Timestamp("2026-01-01").normalize()
+
+CONFIG_PROFILES = {
+    "v1": {
+        "NUM_USERS": 600,
+        "NUM_QUESTIONS": 453,
+        "NUM_SUBMISSIONS": 30_000,
+        "GENERATOR_VERSION": "v1",
+    },
+    "v3": {
+        "NUM_USERS": 2000,
+        "NUM_QUESTIONS": None,
+        "NUM_SUBMISSIONS": None,
+        "GENERATOR_VERSION": "v3",
+        "BETA": 1.5,
+        "P_RETRY": 0.35,
+    },
+}
+
+CURRENT_PROFILE = "v1"
+
+def set_profile(name: str):
+    global CURRENT_PROFILE, NUM_USERS, NUM_QUESTIONS, NUM_SUBMISSIONS
+    if name not in CONFIG_PROFILES:
+        raise ValueError(f"Unknown config profile: {name}")
+    CURRENT_PROFILE = name
+    p = CONFIG_PROFILES[name]
+    if p.get("NUM_USERS") is not None:
+        NUM_USERS = p["NUM_USERS"]
+    if p.get("NUM_QUESTIONS") is not None:
+        NUM_QUESTIONS = p["NUM_QUESTIONS"]
+    if p.get("NUM_SUBMISSIONS") is not None:
+        NUM_SUBMISSIONS = p["NUM_SUBMISSIONS"]
 
 # --------------------------------------------------------------------------
 # Synthetic Data Generation & Archetypes (DATA ENGINE)

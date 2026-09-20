@@ -338,8 +338,8 @@ def generate_synthetic_submissions(
 
     # Days ago: submissions span DATASET_WINDOW_DAYS with power-law recency skew
     days_ago = (rng.power(1.4, size=n_submissions) * config.DATASET_WINDOW_DAYS).astype(float)
-    now = pd.Timestamp.now().normalize()
-    timestamps = now - pd.to_timedelta(days_ago, unit="D")
+    ref_date = getattr(config, "REFERENCE_DATE", pd.Timestamp("2026-01-01").normalize())
+    timestamps = ref_date - pd.to_timedelta(days_ago, unit="D")
 
     # Vectorized / batched solve probability calculation
     solve_probs = np.zeros(n_submissions, dtype=float)
