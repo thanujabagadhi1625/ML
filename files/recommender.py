@@ -357,6 +357,10 @@ class HybridRecommender:
         else:
             self.als = ALSMatrixFactorization()
 
+        self.cf_weight = config.HYBRID_CF_WEIGHT
+        self.content_weight = config.HYBRID_CONTENT_WEIGHT
+        self.weakness_weight = config.HYBRID_WEAKNESS_WEIGHT
+
     @staticmethod
     def _min_max(x: np.ndarray) -> np.ndarray:
         rng = x.max() - x.min()
@@ -412,17 +416,21 @@ class HybridRecommender:
         content_norm = self._min_max(content_scores)
         weakness_norm = self._min_max(weakness_boost)
 
+        cf_w = getattr(self, "cf_weight", config.HYBRID_CF_WEIGHT)
+        cnt_w = getattr(self, "content_weight", config.HYBRID_CONTENT_WEIGHT)
+        wk_w = getattr(self, "weakness_weight", config.HYBRID_WEAKNESS_WEIGHT)
+
         if cf_available:
             blended = (
-                config.HYBRID_CF_WEIGHT * cf_norm
-                + config.HYBRID_CONTENT_WEIGHT * content_norm
-                + config.HYBRID_WEAKNESS_WEIGHT * weakness_norm
+                cf_w * cf_norm
+                + cnt_w * content_norm
+                + wk_w * weakness_norm
             )
         else:
             # Cold start: dynamically re-weight content and weakness
             blended = (
-                (config.HYBRID_CF_WEIGHT + config.HYBRID_CONTENT_WEIGHT) * content_norm
-                + config.HYBRID_WEAKNESS_WEIGHT * weakness_norm
+                (cf_w + cnt_w) * content_norm
+                + wk_w * weakness_norm
             )
 
         # 5. Global difficulty suitability fallback if user has no signal
