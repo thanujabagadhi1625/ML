@@ -1217,6 +1217,331 @@ def compute_user_topic_profile(
     return df_profile
 
 
+# ==============================================================================
+# 1b. SYNTHETIC DATA GENERATOR V3 (Honest, Multi-Factor Generative Simulator)
+# ==============================================================================
+"""
+Generative Simulator v3 Assumptions & Architecture:
+--------------------------------------------------
+1. Dirichlet Topic Affinity: Each user u is assigned a 20-dimensional latent topic interest vector
+   theta_u ~ Dirichlet(alpha_arch). Archetypes shift the mean concentration vector alpha_arch,
+   ensuring users within an archetype have correlated preferences while maintaining individual variance.
+   Users of the same archetype do NOT share identical distributions.
+2. Stochastic Individual Skill & Evolution: Base ability skill_u(0) ~ Normal(mu_arch, sigma_skill) has
+   individual noise per user. Temporal progress skill_u(t) = skill_u(0) + slope_arch * elapsed_days
+   evolves chronologically according to the archetype profile (improving, declining, stable).
+3. Universal Long-Tailed Question Popularity: Problem base popularity follows a long-tailed Zipf/power-law
+   distribution (fixed by dataset seed), reflecting realistic platform selection concentration.
+4. Problem Choice Mechanics: The probability of user u selecting problem q at time t is proportional to:
+   P(q | u, t) proportional to popularity(q) * exp(beta * (theta_u . tags_q)) * difficulty_fit(skill_u(t), diff_q)
+   where difficulty_fit favors problems slightly above the user's current ability (skill + delta).
+   Parameter beta scales topic preference strength.
+5. Re-attempt Dynamics: After a failed submission, the user retries the same question with configurable
+   probability p_retry; after an Accepted submission, the user transitions to a new problem choice.
+6. IRT Solve Probability: Solve probability follows an Item Response Theory logistic model driven by
+   the exact same time-varying skill skill_u(t) and topic match used during question selection.
+7. Heavy-Tailed User Activity Volume: The number of submissions per user M_u follows a lognormal
+   distribution with configurable mean (~100) and minimum 20.
+8. Chronological Sequence & Consistent Rating Target: Submissions are generated in strictly increasing
+   chronological order over span min(account_age_days, 365). The user's contest_rating label is
+   computed from true skill at the END of this actual submission span, resolving historical duration mismatches.
+"""
+
+
+def generate_synthetic_users_v3(
+    n: int = 2000,
+    random_seed: int = config.RANDOM_SEED,
+    return_latent_info: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    rng = _rng(random_seed)
+    archetype_names = config.USER_ARCHETYPES
+    archetypes = [archetype_names[i % len(archetype_names)] for i in range(n)]
+
+    tag_to_idx = {t: i for i, t in enumerate(config.TOPIC_TAGS)}
+    n_tags = len(config.TOPIC_TAGS)
+
+    # Base concentration per archetype for Dirichlet topic interest
+    archetype_alphas = {}
+    for arch in archetype_names:
+        a = np.ones(n_tags, dtype=float)
+        if arch == "weak_dp":
+            if "Dynamic Programming" in tag_to_idx:
+                a[tag_to_idx["Dynamic Programming"]] = 8.0
+        elif arch == "weak_graph":
+            for t in ["Graph", "Tree", "Depth-First Search", "Breadth-First Search"]:
+                if t in tag_to_idx:
+                    a[tag_to_idx[t]] = 6.0
+        elif arch == "specialized":
+            for t in ["Array", "String", "Math", "Two Pointers"]:
+                if t in tag_to_idx:
+                    a[tag_to_idx[t]] = 6.0
+        elif arch == "strong_overall":
+            a[:] = 2.0
+        archetype_alphas[arch] = a
+
+    base_skills = np.zeros(n)
+    hard_resilience = np.zeros(n)
+    learning_slopes = np.zeros(n)
+    topic_interests = np.zeros((n, n_tags), dtype=float)
+
+    for i, arch in enumerate(archetypes):
+        alpha = archetype_alphas[arch]
+        topic_interests[i] = rng.dirichlet(alpha)
+
+        # Individual skill noise
+        s_noise = rng.normal(0.0, 0.20)
+        h_noise = rng.normal(0.0, 0.10)
+
+        if arch == "strong_overall":
+            base_skills[i] = 1.6 + s_noise
+            hard_resilience[i] = 0.5 + h_noise
+        elif arch == "weak_dp":
+            base_skills[i] = 0.8 + s_noise
+            hard_resilience[i] = 0.0 + h_noise
+        elif arch == "weak_graph":
+            base_skills[i] = 0.8 + s_noise
+            hard_resilience[i] = 0.0 + h_noise
+        elif arch == "strong_easy_med_weak_hard":
+            base_skills[i] = 1.1 + s_noise
+            hard_resilience[i] = -2.2 + h_noise
+        elif arch == "improving":
+            base_skills[i] = -1.2 + s_noise
+            learning_slopes[i] = 2.4 / 365.0
+            hard_resilience[i] = 0.0 + h_noise
+        elif arch == "declining":
+            base_skills[i] = 1.2 + s_noise
+            learning_slopes[i] = -2.4 / 365.0
+            hard_resilience[i] = 0.0 + h_noise
+        elif arch == "stable":
+            base_skills[i] = 0.0 + rng.normal(0.0, 0.30)
+            hard_resilience[i] = 0.0 + h_noise
+        elif arch == "high_attempt_low_accuracy":
+            base_skills[i] = -0.6 + s_noise
+            hard_resilience[i] = -0.5 + h_noise
+        elif arch == "specialized":
+            base_skills[i] = 0.2 + s_noise
+            hard_resilience[i] = 0.0 + h_noise
+
+    account_age_days = rng.integers(60, 1400, size=n)
+    submission_span = np.minimum(account_age_days, 365)
+    final_skill = base_skills + learning_slopes * submission_span
+
+    contest_rating = (
+        1200.0
+        + 260.0 * final_skill
+        + 45.0 * hard_resilience
+        + 0.08 * np.sqrt(submission_span) * 10.0
+        + rng.normal(0, 35.0, size=n)
+    )
+    contest_rating = np.clip(contest_rating, 800.0, 3000.0)
+
+    users_df = pd.DataFrame({
+        "user_id": np.arange(1, n + 1),
+        "account_age_days": account_age_days,
+        "latent_skill": final_skill,
+        "contest_rating": contest_rating,
+    })
+
+    if return_latent_info:
+        latent_df = pd.DataFrame({
+            "user_id": np.arange(1, n + 1),
+            "archetype": archetypes,
+            "base_skill": base_skills,
+            "hard_resilience": hard_resilience,
+            "learning_slope": learning_slopes,
+            "submission_span": submission_span,
+            "topic_interest": [topic_interests[i] for i in range(n)],
+        })
+        return users_df[USER_COLUMNS], latent_df
+
+    return users_df[USER_COLUMNS]
+
+
+def generate_synthetic_submissions_v3(
+    users_df: pd.DataFrame,
+    questions_df: pd.DataFrame,
+    random_seed: int = config.RANDOM_SEED,
+    latent_users_info: pd.DataFrame | None = None,
+    beta: float = 1.5,
+    p_retry: float = 0.35,
+    mean_submissions: float = 100.0,
+    min_submissions: int = 20,
+    lognormal_sigma: float = 0.55,
+    ref_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    rng = _rng(random_seed)
+    n_users = len(users_df)
+    n_questions = len(questions_df)
+    question_ids = questions_df["question_id"].to_numpy()
+
+    if ref_date is None:
+        ref_date = getattr(config, "REFERENCE_DATE", pd.Timestamp("2026-01-01").normalize())
+
+    # Pre-map question difficulties and tags
+    diff_map = config.DIFFICULTY_SCORE
+    d_q = questions_df["difficulty"].map(diff_map).fillna(2.2).to_numpy()
+
+    easy_mask = (d_q <= 1.5)
+    med_mask = (d_q > 1.5) & (d_q < 3.0)
+    hard_mask = (d_q >= 3.0)
+
+    tag_to_idx = {t: i for i, t in enumerate(config.TOPIC_TAGS)}
+    n_tags = len(config.TOPIC_TAGS)
+    T_tags = np.zeros((n_questions, n_tags), dtype=float)
+    for j, tags in enumerate(questions_df["topic_tags"]):
+        for t in tags:
+            if t in tag_to_idx:
+                T_tags[j, tag_to_idx[t]] = 1.0
+
+    # Universal long-tailed question popularity (Zipf distribution) fixed by seed
+    pop_rng = np.random.default_rng(random_seed + 777)
+    ranks = np.arange(1, n_questions + 1)
+    pop_weights = 1.0 / (ranks ** 0.8)
+    pop_rng.shuffle(pop_weights)
+    pop_weights /= pop_weights.sum()
+
+    # Latent user info
+    if latent_users_info is not None:
+        latent_dict = latent_users_info.set_index("user_id").to_dict(orient="index")
+    else:
+        _, lat_df = generate_synthetic_users_v3(n=n_users, random_seed=random_seed, return_latent_info=True)
+        latent_dict = lat_df.set_index("user_id").to_dict(orient="index")
+
+    # Lognormal heavy-tailed submissions per user
+    mu = np.log(mean_submissions) - 0.5 * (lognormal_sigma ** 2)
+    user_n_subs = np.maximum(
+        min_submissions,
+        np.round(rng.lognormal(mean=mu, sigma=lognormal_sigma, size=n_users)),
+    ).astype(int)
+
+    all_user_ids = []
+    all_q_ids = []
+    all_timestamps = []
+    all_statuses = []
+    all_runtimes = []
+    all_languages = []
+
+    fail_statuses = config.SUBMISSION_STATUSES[1:]
+    fail_weights = config.STATUS_BASE_WEIGHTS[1:] / config.STATUS_BASE_WEIGHTS[1:].sum()
+    lang_choices = config.LANGUAGES
+    lang_weights = [0.5, 0.2, 0.15, 0.1, 0.05]
+
+    for u_idx, row in users_df.reset_index(drop=True).iterrows():
+        uid = int(row["user_id"])
+        u_info = latent_dict[uid]
+        M_u = int(user_n_subs[u_idx])
+        T_u = float(min(row["account_age_days"], 365.0))
+        base_skill = float(u_info["base_skill"])
+        slope = float(u_info["learning_slope"])
+        hard_res = float(u_info["hard_resilience"])
+        theta_u = np.asarray(u_info["topic_interest"], dtype=float)
+
+        # Base question selection mass for this user (popularity * exp(beta * theta . tags))
+        tag_match = T_tags @ theta_u  # (N,)
+        base_q_mass = pop_weights * np.exp(beta * tag_match)
+
+        # Strictly increasing timestamps spanning min(age, 365)
+        start_date = ref_date - pd.to_timedelta(T_u, unit="D")
+        deltas = rng.exponential(scale=1.0, size=M_u) + 1e-4
+        cum_deltas = np.cumsum(deltas)
+        span_sec = max(T_u, 1.0) * 86400.0
+        rel_sec = (cum_deltas / cum_deltas[-1]) * span_sec
+        u_ts = start_date + pd.to_timedelta(rel_sec, unit="s")
+
+        prev_qid = -1
+        prev_j = -1
+        prev_status = None
+
+        for k in range(M_u):
+            elapsed_days = rel_sec[k] / 86400.0
+            current_skill = base_skill + slope * elapsed_days
+
+            # Question choice
+            if k > 0 and prev_status != "Accepted" and rng.random() < p_retry:
+                q_k = prev_qid
+                j_k = prev_j
+            else:
+                # Difficulty fit favors problems slightly above user's current skill
+                s_star = current_skill + 0.35
+                me = np.exp(-((-1.2 - s_star) ** 2) / 1.28)
+                mm = np.exp(-((0.0 - s_star) ** 2) / 1.28)
+                mh = np.exp(-((1.4 - s_star) ** 2) / 1.28)
+                W_k = base_q_mass * np.where(easy_mask, me, np.where(med_mask, mm, mh))
+                W_sum = W_k.sum()
+                if W_sum <= 0:
+                    p_k = np.ones(n_questions) / n_questions
+                else:
+                    p_k = W_k / W_sum
+                cdf = np.cumsum(p_k)
+                j_k = int(np.searchsorted(cdf, rng.random()))
+                if j_k >= n_questions:
+                    j_k = n_questions - 1
+                q_k = question_ids[j_k]
+
+            # Solve probability (IRT formula)
+            q_diff = d_q[j_k]
+            eff_diff = q_diff - (hard_res if q_diff >= 3.0 else 0.0)
+            topic_eff = (tag_match[j_k] - 0.05) * 2.0
+            logit = 1.4 * (current_skill + topic_eff - (eff_diff - 2.2))
+            prob = 1.0 / (1.0 + np.exp(-np.clip(logit, -10.0, 10.0)))
+            prob = np.clip(prob, 0.02, 0.98)
+
+            is_accepted = (rng.random() < prob)
+            status_k = "Accepted" if is_accepted else rng.choice(fail_statuses, p=fail_weights)
+
+            all_user_ids.append(uid)
+            all_q_ids.append(q_k)
+            all_timestamps.append(u_ts[k])
+            all_statuses.append(status_k)
+            all_runtimes.append(rng.gamma(shape=2.0, scale=45.0))
+            all_languages.append(rng.choice(lang_choices, p=lang_weights))
+
+            prev_qid = q_k
+            prev_j = j_k
+            prev_status = status_k
+
+    df = pd.DataFrame({
+        "user_id": all_user_ids,
+        "question_id": all_q_ids,
+        "timestamp": all_timestamps,
+        "status": all_statuses,
+        "runtime_ms": all_runtimes,
+        "language": all_languages,
+    })
+
+    return df[SUBMISSION_COLUMNS]
+
+
+def generate_synthetic_dataset_v3(
+    questions_df: pd.DataFrame | None = None,
+    n_users: int = 2000,
+    random_seed: int = config.RANDOM_SEED,
+    beta: float = 1.5,
+    p_retry: float = 0.35,
+    mean_submissions: float = 100.0,
+    min_submissions: int = 20,
+    ref_date: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Convenience entry point returning (users_df, questions_df, submissions_df, latent_df)."""
+    if questions_df is None:
+        questions_df = load_canonical_questions()
+    users_df, latent_df = generate_synthetic_users_v3(
+        n=n_users, random_seed=random_seed, return_latent_info=True
+    )
+    submissions_df = generate_synthetic_submissions_v3(
+        users_df=users_df,
+        questions_df=questions_df,
+        random_seed=random_seed,
+        latent_users_info=latent_df,
+        beta=beta,
+        p_retry=p_retry,
+        mean_submissions=mean_submissions,
+        min_submissions=min_submissions,
+        ref_date=ref_date,
+    )
+    return users_df, questions_df, submissions_df, latent_df
+
+
 if __name__ == "__main__":
     users_df, questions_df, submissions_df = generate_full_synthetic_dataset()
     fe = FeatureEngineer(users_df, questions_df, submissions_df)

@@ -554,10 +554,11 @@ This project implements a strict local-first privacy model:
 
 ## Limitations
 
-1. **Synthetic Population Domain Gap**: Offline models are trained on simulated Item Response Theory distributions. While behavioral archetypes mirror human practice patterns, synthetic data cannot replicate all human nuances (e.g., contest server outages, copying external solutions).
-2. **Benchmark Proxy Rating**: The contest rating regressor estimates expected performance on a benchmark scale and should not be confused with official LeetCode contest ratings.
-3. **Cold-Start Boundary for ALS**: The closed-form fold-in requires $\ge 3$ unique attempted questions to construct a stable collaborative vector. Users with fewer interactions rely on content-based similarity and weakness boosting.
-4. **Catalog Scope**: Problem recommendations and semantic search operate within the 453-question canonical catalog. Questions outside this set are aligned via slug matching or topic tag projection.
+1. **Circularity Limitation**: Models are evaluated on data whose structure I designed, so results measure recoverability of my simulator, not real-world quality. Offline benchmark metrics demonstrate whether mathematical collaborative filtering and regression engines can reconstruct controlled generative signals, not whether they transfer losslessly to unobserved human behavioral distributions.
+2. **Synthetic Population Domain Gap**: Offline models are trained on simulated Item Response Theory distributions. While behavioral archetypes mirror human practice patterns, synthetic data cannot replicate all human nuances (e.g., contest server outages, copying external solutions).
+3. **Benchmark Proxy Rating**: The contest rating regressor estimates expected performance on a benchmark scale and should not be confused with official LeetCode contest ratings.
+4. **Cold-Start Boundary for ALS**: The closed-form fold-in requires $\ge 3$ unique attempted questions to construct a stable collaborative vector. Users with fewer interactions rely on content-based similarity and weakness boosting.
+5. **Catalog Scope**: Problem recommendations and semantic search operate within the canonical catalog. Questions outside this set are aligned via slug matching or topic tag projection.
 
 ---
 
