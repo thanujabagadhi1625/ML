@@ -213,11 +213,13 @@ where:
 - $\min\left(1, \frac{\text{Failures}}{5}\right)$ provides an exposure penalty scaling with accumulated failure evidence.
 
 ### Weakness Classifications
-- **Critical** ($\text{RiskScore} \ge 0.70$): High volume of failures combined with low recent accuracy; immediate remediation required.
-- **Weak** ($0.55 \le \text{RiskScore} < 0.70$): Noticeable failure rate or declining recency momentum.
-- **Moderate** ($0.40 \le \text{RiskScore} < 0.55$): Balanced performance with occasional struggle on Hard problems.
-- **Neutral** ($0.25 \le \text{RiskScore} < 0.40$): Consistent success rate across Medium problems.
-- **Strong** ($\text{RiskScore} < 0.25$): High accuracy on Medium and Hard problems with sustained recent momentum.
+Topic weakness is classified using a combination of empirical lifetime success rate, attempt volume, and composite risk score (with a cold-start guard requiring $\ge 3$ attempts):
+
+- **Critical**: $(\text{Acc}_{\text{lifetime}} \le 0.42 \text{ and } \text{Attempts} \ge 8) \lor (\text{RiskScore} \ge 0.55 \text{ and } \text{Attempts} \ge 5)$ — Substantial volume of attempts combined with acute failure evidence or high composite risk; immediate remediation recommended.
+- **Weak**: $(\text{Acc}_{\text{lifetime}} \le 0.52 \text{ and } \text{Attempts} \ge 5) \lor (\text{RiskScore} \ge 0.45 \text{ and } \text{Attempts} \ge 4)$ — Noticeable failure rate or declining recency momentum across multiple problems.
+- **Moderate**: $\text{Acc}_{\text{lifetime}} \le 0.68$ (with $\text{Attempts} \ge 3$) — Balanced performance with occasional struggle on challenging problems.
+- **Strong**: $\text{Acc}_{\text{lifetime}} > 0.68$ (with $\text{Attempts} \ge 3$) — Reliable success rate across problems with sustained positive momentum.
+- **Neutral** ($\text{Attempts} < 3$): Cold-start guard; insufficient interaction history in this topic to reliably assess weakness ($\text{RiskScore} = 0.0$).
 
 ---
 

@@ -78,6 +78,33 @@ class TestDataProcessing(unittest.TestCase):
         self.assertTrue((feature_matrix["recency_momentum"] >= 0.0).all())
         self.assertTrue((feature_matrix["recency_momentum"] <= 1.0).all())
 
+    def test_no_latent_columns_in_feature_matrix(self):
+        """Verify strictly no latent or generator-only columns enter the feature matrix."""
+        users_df, questions_df, submissions_df = generate_full_synthetic_dataset()
+        fe = FeatureEngineer(users_df, questions_df, submissions_df)
+        fm = fe.build_user_feature_matrix()
+
+        forbidden_cols = [
+            "latent_skill", "archetype", "base_skill", "hard_resilience",
+            "learning_slope", "attempt_multiplier", "topic_affinities",
+            "skill_level", "initial_skill", "archetype_name", "user_archetype",
+            "topic_weights", "latent_topics", "user_latent_vector",
+        ]
+        for col in forbidden_cols:
+            self.assertNotIn(col, fm.columns)
+
+        # Also test with generator v3 and intentional leakage injection
+        from data_processing import generate_synthetic_dataset_v3
+        u3, q3, s3, l3 = generate_synthetic_dataset_v3(questions_df, n_users=20, random_seed=42)
+        u3["latent_skill"] = 1.5
+        u3["archetype"] = "specialized"
+        u3["base_skill"] = 2.0
+        fe3 = FeatureEngineer(u3, q3, s3)
+        fm3 = fe3.build_user_feature_matrix()
+        for col in forbidden_cols:
+            self.assertNotIn(col, fm3.columns)
+        self.assertIn("account_age_days", fm3.columns)
+
     def test_topic_weakness_profile(self):
         """Verify structured topic weakness profile generation."""
         users_df, questions_df, submissions_df = generate_full_synthetic_dataset()

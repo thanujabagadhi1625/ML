@@ -1045,7 +1045,26 @@ class FeatureEngineer:
         )
         return intensity
 
-    # ---- 2e. Assemble final feature matrix ------------------------------------
+    # ---- 2e. Account age from submission timestamps --------------------------
+    def compute_account_age(self) -> pd.DataFrame:
+        """
+        Computes account_age_days directly from submission timestamps ((max_ts - min_ts).days)
+        rather than trusting any static user attribute or latent generator value.
+        """
+        sub = self.submissions_df
+        cols = ["account_age_days"]
+        if sub.empty or "timestamp" not in sub.columns:
+            return pd.DataFrame(columns=cols, index=pd.Index([], name="user_id"))
+
+        sub_dt = sub.copy()
+        if not pd.api.types.is_datetime64_any_dtype(sub_dt["timestamp"]):
+            sub_dt["timestamp"] = pd.to_datetime(sub_dt["timestamp"], errors="coerce")
+
+        ts_agg = sub_dt.dropna(subset=["timestamp"]).groupby("user_id")["timestamp"].agg(min_ts="min", max_ts="max")
+        age_days = (ts_agg["max_ts"] - ts_agg["min_ts"]).dt.days.astype(float)
+        return age_days.to_frame(name="account_age_days")
+
+    # ---- 2f. Assemble final feature matrix ------------------------------------
     def build_user_feature_matrix(self) -> pd.DataFrame:
         """
         Joins all engineered feature blocks with static user attributes and
@@ -1057,13 +1076,19 @@ class FeatureEngineer:
             .join(self.compute_difficulty_distribution(), how="left")
             .join(self.compute_recency_momentum(), how="left")
             .join(self.compute_submission_intensity(), how="left")
+            .join(self.compute_account_age(), how="left")
             .fillna(0.0)
         )
 
-        full = self.users_df.set_index("user_id").join(features, how="left").fillna(0.0)
+        # Drop account_age_days from users_df to ensure it comes strictly from submission timestamps
+        users = self.users_df.drop(columns=["account_age_days"], errors="ignore")
+        full = users.set_index("user_id").join(features, how="left").fillna(0.0)
+
         drop_leakage = [
             "latent_skill", "archetype", "base_skill", "hard_resilience",
-            "learning_slope", "attempt_multiplier", "topic_affinities"
+            "learning_slope", "attempt_multiplier", "topic_affinities",
+            "skill_level", "initial_skill", "archetype_name", "user_archetype",
+            "topic_weights", "latent_topics", "user_latent_vector",
         ]
         full = full.drop(columns=[c for c in drop_leakage if c in full.columns], errors="ignore")
         return full.reset_index()
