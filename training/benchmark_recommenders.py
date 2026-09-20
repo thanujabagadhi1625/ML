@@ -2,18 +2,23 @@
 training/benchmark_recommenders.py
 ----------------------------------
 Honest, multi-seed evaluation harness for recommendation models:
-  a) random among unsolved questions
-  b) popularity: most-solved questions among TRAIN users, excluding user's solved questions
-  c) content-only (tag similarity)
-  d) ALS-only (fold-in scores)
-  e) hybrid (HybridRecommender)
+  1) random among unsolved questions
+  2) popularity: most-solved questions among TRAIN users, excluding user's solved questions
+  3) content-only (tag similarity)
+  4) ALS-only (fold-in scores)
+  5) hybrid (HybridRecommender with diversity enforcement)
+  6) als_popularity_blend: 0.5 * als_score + 0.5 * pop_score (both min-max normalized)
+  7) hybrid_popularity_blend: hybrid blend with popularity term added (pop_w=0.1, re-weighting others to sum to 1)
+  8) hybrid_no_diversity: HybridRecommender with enforce_diversity=False
 
 Metrics reported at K=5 and K=10:
   - Precision@K, Recall@K, HitRate@K, NDCG@K
+  - WeakCoverage@K: share of top-K recs with tags in user's Critical/Weak topics
+  - DifficultyFit@K: share of top-K recs whose difficulty matches user level or 1 level above
   - Per-method mean and std across seeds
   - 95% bootstrap confidence interval over user evaluations
-  - Paired differences (hybrid - popularity, hybrid - random) with 95% CI
-  - Evaluated test users count, ground-truth items per user
+  - Paired differences (hybrid - popularity, hybrid - random, hybrid - als_only) with 95% CI
+  - Evaluated users count, ground-truth items per user
   - ALS training time, average interactions per user/item, matrix density
   - Head vs tail item breakdown (top 20% items by popularity vs remaining 80%)
 """
@@ -40,6 +45,7 @@ if str(ROOT_DIR) not in sys.path:
 
 import config
 from data_processing import (
+    compute_user_topic_profile,
     generate_synthetic_submissions,
     generate_synthetic_users,
     load_canonical_questions,
@@ -86,6 +92,40 @@ def get_popularity_rankings(train_subs: pd.DataFrame, all_qids: list[int]) -> li
     return sorted(all_qids, key=lambda q: (-solve_counts.get(q, 0), q))
 
 
+def get_popularity_counts(train_subs: pd.DataFrame, all_qids: list[int]) -> dict[int, int]:
+    """Returns dict mapping question_id to number of unique train users who solved it."""
+    train_solved = train_subs[train_subs["status"] == "Accepted"]
+    if train_solved.empty:
+        return {q: 0 for q in all_qids}
+    counts = train_solved.groupby("question_id")["user_id"].nunique().to_dict()
+    return {q: counts.get(q, 0) for q in all_qids}
+
+
+def compute_user_difficulty_level(u_hist: pd.DataFrame, qid_to_diff: dict[int, str]) -> int:
+    """
+    Computes user level: highest difficulty with >= 3 history attempts and >= 50% accuracy.
+    Defaults to Easy (0).
+    Returns level index: 0 (Easy), 1 (Medium), 2 (Hard).
+    """
+    if u_hist.empty:
+        return 0
+
+    if "difficulty" in u_hist.columns and u_hist["difficulty"].notna().any():
+        hist_diffs = u_hist["difficulty"]
+    else:
+        hist_diffs = u_hist["question_id"].map(qid_to_diff)
+
+    for lvl_idx, diff_name in [(2, "Hard"), (1, "Medium"), (0, "Easy")]:
+        diff_mask = hist_diffs == diff_name
+        attempts = int(diff_mask.sum())
+        if attempts >= 3:
+            accepted = int((diff_mask & (u_hist["status"] == "Accepted")).sum())
+            acc = accepted / float(attempts)
+            if acc >= 0.50:
+                return lvl_idx
+    return 0
+
+
 def run_benchmark(
     seeds: list[int] = list(range(1, 11)),
     k_values: list[int] = [5, 10],
@@ -96,6 +136,7 @@ def run_benchmark(
     output_path: str | Path | None = None,
     als_params: dict | None = None,
     hybrid_weights: tuple[float, float, float] | None = None,
+    evaluate_on: str = "test",
     verbose: bool = True,
 ) -> dict[str, Any]:
     """
@@ -120,20 +161,33 @@ def run_benchmark(
         questions_df = load_canonical_questions().reset_index(drop=True)
 
     all_qids = questions_df["question_id"].tolist()
+    qid_to_tags = dict(zip(questions_df["question_id"], questions_df["topic_tags"]))
+    qid_to_diff = dict(zip(questions_df["question_id"], questions_df["difficulty"]))
+
     content_model = ContentBasedRecommender(questions_df)
-    methods = ["random", "popularity", "content_only", "als_only", "hybrid"]
+    methods = [
+        "random",
+        "popularity",
+        "content_only",
+        "als_only",
+        "hybrid",
+        "als_popularity_blend",
+        "hybrid_popularity_blend",
+        "hybrid_no_diversity",
+    ]
+    metric_names = ["precision", "recall", "hit_rate", "ndcg", "weak_coverage", "difficulty_fit"]
 
     # Storage for per-seed and per-user metrics
     seed_metrics: dict[str, dict[str, list[float]]] = {
-        m: {f"{metric}@{k}": [] for k in k_values for metric in ["precision", "recall", "hit_rate", "ndcg"]}
+        m: {f"{metric}@{k}": [] for k in k_values for metric in metric_names}
         for m in methods
     }
     user_evaluations: dict[str, dict[str, list[float]]] = {
-        m: {f"{metric}@{k}": [] for k in k_values for metric in ["precision", "recall", "hit_rate", "ndcg"]}
+        m: {f"{metric}@{k}": [] for k in k_values for metric in metric_names}
         for m in methods
     }
 
-    # Head vs tail tracking for hybrid and popularity
+    # Head vs tail tracking for all methods
     head_tail_shares: dict[str, dict[int, list[float]]] = {
         m: {k: [] for k in k_values} for m in methods
     }
@@ -147,7 +201,7 @@ def run_benchmark(
 
     for seed in seeds:
         if verbose:
-            print(f"\n--- Running Seed {seed}/{len(seeds)} (Generator: {generator_version}) ---")
+            print(f"\n--- Running Seed {seed}/{len(seeds)} (Generator: {generator_version}, Eval: {evaluate_on}) ---")
 
         # 1. Generate data
         if generator_version == "v1":
@@ -168,9 +222,10 @@ def run_benchmark(
                 n_users=n_users,
                 random_seed=seed,
             )
-            # Ensure questions_df aligns
             questions_df = questions_df_gen
             all_qids = questions_df["question_id"].tolist()
+            qid_to_tags = dict(zip(questions_df["question_id"], questions_df["topic_tags"]))
+            qid_to_diff = dict(zip(questions_df["question_id"], questions_df["difficulty"]))
             content_model = ContentBasedRecommender(questions_df)
         else:
             raise ValueError(f"Unsupported generator version: {generator_version}")
@@ -204,27 +259,35 @@ def run_benchmark(
         interactions_per_item_list.append(avg_inter_item)
         matrix_densities.append(density)
 
-        # Precompute popularity ordering from train
+        # Precompute popularity ordering and scores from train
         pop_ordered = get_popularity_rankings(train_s, all_qids)
+        pop_counts = get_popularity_counts(train_s, all_qids)
+        pop_scores_arr = np.array([pop_counts.get(q, 0.0) for q in all_qids], dtype=float)
+        rng_pop = pop_scores_arr.max() - pop_scores_arr.min()
+        pop_norm_arr = (pop_scores_arr - pop_scores_arr.min()) / rng_pop if rng_pop > 1e-9 else np.zeros_like(pop_scores_arr)
+        pop_norm_by_qid = dict(zip(all_qids, pop_norm_arr))
 
         # Head items definition: top 20% most-solved items in train
         n_head = max(1, int(round(0.20 * len(all_qids))))
         head_qids = set(pop_ordered[:n_head])
 
-        # 4. Temporal split test users (80% history / 20% future)
-        test_h, test_f = temporal_split_user_submissions(
-            test_s, history_ratio=config.TEMPORAL_HISTORY_RATIO
+        # 4. Temporal split evaluation users (80% history / 20% future)
+        target_u = val_u if evaluate_on == "val" else test_u
+        target_s = val_s if evaluate_on == "val" else test_s
+
+        eval_h, eval_f = temporal_split_user_submissions(
+            target_s, history_ratio=config.TEMPORAL_HISTORY_RATIO
         )
 
         # Build ground truth
         future_solved_by_user = (
-            test_f[test_f["status"] == "Accepted"]
+            eval_f[eval_f["status"] == "Accepted"]
             .groupby("user_id")["question_id"]
             .apply(set)
             .to_dict()
         )
         history_solved_by_user = (
-            test_h[test_h["status"] == "Accepted"]
+            eval_h[eval_h["status"] == "Accepted"]
             .groupby("user_id")["question_id"]
             .apply(set)
             .to_dict()
@@ -233,24 +296,22 @@ def run_benchmark(
         # Initialize HybridRecommender
         recommender = HybridRecommender(questions_df, als_model=als)
         if hybrid_weights is not None:
-            # Dynamically set weights if custom tuned
             w_cf, w_content, w_weak = hybrid_weights
             recommender.cf_weight = w_cf
             recommender.content_weight = w_content
             recommender.weakness_weight = w_weak
 
-        # Per-seed accumulator for this seed's user means
         seed_user_metrics: dict[str, dict[str, list[float]]] = {
-            m: {f"{metric}@{k}": [] for k in k_values for metric in ["precision", "recall", "hit_rate", "ndcg"]}
+            m: {f"{metric}@{k}": [] for k in k_values for metric in metric_names}
             for m in methods
         }
 
-        test_uids = sorted(test_u["user_id"].unique())
+        eval_uids = sorted(target_u["user_id"].unique())
         evaluated_users_count = 0
         gt_item_counts = []
 
         # Recommender evaluation per user
-        for uid in test_uids:
+        for uid in eval_uids:
             past_solved = history_solved_by_user.get(uid, set())
             future_solved = future_solved_by_user.get(uid, set())
             gt_solved = future_solved - past_solved
@@ -259,27 +320,49 @@ def run_benchmark(
 
             evaluated_users_count += 1
             gt_item_counts.append(len(gt_solved))
-            u_hist = test_h[test_h["user_id"] == uid]
+            u_hist = eval_h[eval_h["user_id"] == uid]
+
+            # Compute user topic profile and difficulty fit parameters
+            u_topic_profile = compute_user_topic_profile(u_hist, questions_df, user_id=uid)
+            if u_topic_profile is not None and not u_topic_profile.empty:
+                crit_weak_topics = set(
+                    u_topic_profile[u_topic_profile["weakness_level"].isin(["Critical", "Weak"])]["topic"]
+                )
+            else:
+                crit_weak_topics = set()
+
+            user_diff_lvl = compute_user_difficulty_level(u_hist, qid_to_diff)
+            # Level 0 (Easy): Easy, Medium
+            # Level 1 (Medium): Medium, Hard
+            # Level 2 (Hard): Hard
+            allowed_diff_levels = {
+                0: {"Easy", "Medium"},
+                1: {"Medium", "Hard"},
+                2: {"Hard"},
+            }
+            allowed_diffs = allowed_diff_levels.get(user_diff_lvl, {"Easy", "Medium"})
 
             # Candidate pool excluding past_solved
             unsolved_candidates = [q for q in all_qids if q not in past_solved]
 
-            # a) Random
+            # 1) Random
             user_rand_rng = np.random.default_rng(seed * 100_000 + int(uid))
             random_pool = list(unsolved_candidates)
             user_rand_rng.shuffle(random_pool)
 
-            # b) Popularity
+            # 2) Popularity
             pop_recs = [q for q in pop_ordered if q not in past_solved]
 
-            # c) Content-Only
+            # 3) Content-Only
             solved_ids = list(past_solved)
             failed_ids = u_hist[u_hist["status"] != "Accepted"]["question_id"].unique().tolist()
             content_scores = content_model.similar_to_user_profile(solved_ids, failed_ids)
             content_scores_by_qid = dict(zip(questions_df["question_id"], content_scores))
             content_recs = sorted(unsolved_candidates, key=lambda q: (-content_scores_by_qid.get(q, 0.0), q))
 
-            # d) ALS-Only
+            # 4) ALS-Only
+            cf_ok = False
+            cf_by_qid = {}
             if not u_hist.empty:
                 interactions = build_interaction_matrix(u_hist)
                 raw_cf, cf_ok = als.fold_in_user(
@@ -294,11 +377,51 @@ def run_benchmark(
             else:
                 als_recs = list(pop_recs)
 
-            # e) Hybrid (current HybridRecommender)
-            hybrid_recs_df_max = recommender.recommend(
-                user_id=uid, top_n=max(k_values), user_submissions_df=u_hist
+            # 5) Hybrid (current HybridRecommender with enforce_diversity=True)
+            hybrid_recs_df = recommender.recommend(
+                user_id=uid,
+                top_n=max(k_values),
+                topic_profile=u_topic_profile,
+                user_submissions_df=u_hist,
+                enforce_diversity=True,
             )
-            hybrid_recs = hybrid_recs_df_max["question_id"].tolist()
+            hybrid_recs = hybrid_recs_df["question_id"].tolist()
+
+            # 6) ALS + Popularity Blend: 0.5 * als + 0.5 * pop (both min-max normalized)
+            if cf_ok:
+                cf_scores_arr = np.array([cf_by_qid.get(q, 0.0) for q in all_qids], dtype=float)
+                rng_cf = cf_scores_arr.max() - cf_scores_arr.min()
+                cf_norm_arr = (cf_scores_arr - cf_scores_arr.min()) / rng_cf if rng_cf > 1e-9 else np.zeros_like(cf_scores_arr)
+                cf_norm_by_qid = dict(zip(all_qids, cf_norm_arr))
+                als_pop_scores = {
+                    q: 0.5 * cf_norm_by_qid.get(q, 0.0) + 0.5 * pop_norm_by_qid.get(q, 0.0)
+                    for q in all_qids
+                }
+                als_pop_recs = sorted(unsolved_candidates, key=lambda q: (-als_pop_scores.get(q, 0.0), q))
+            else:
+                als_pop_recs = list(pop_recs)
+
+            # 7) Hybrid + Popularity Blend: pop_w=0.1, re-weighting others to sum to 1
+            hybrid_pop_df = recommender.recommend(
+                user_id=uid,
+                top_n=max(k_values),
+                topic_profile=u_topic_profile,
+                user_submissions_df=u_hist,
+                enforce_diversity=True,
+                popularity_weight=0.10,
+                popularity_scores=pop_norm_by_qid,
+            )
+            hybrid_pop_recs = hybrid_pop_df["question_id"].tolist()
+
+            # 8) Hybrid without diversity enforcement
+            hybrid_nodiv_df = recommender.recommend(
+                user_id=uid,
+                top_n=max(k_values),
+                topic_profile=u_topic_profile,
+                user_submissions_df=u_hist,
+                enforce_diversity=False,
+            )
+            hybrid_nodiv_recs = hybrid_nodiv_df["question_id"].tolist()
 
             method_recs = {
                 "random": random_pool,
@@ -306,6 +429,9 @@ def run_benchmark(
                 "content_only": content_recs,
                 "als_only": als_recs,
                 "hybrid": hybrid_recs,
+                "als_popularity_blend": als_pop_recs,
+                "hybrid_popularity_blend": hybrid_pop_recs,
+                "hybrid_no_diversity": hybrid_nodiv_recs,
             }
 
             for m in methods:
@@ -325,21 +451,24 @@ def run_benchmark(
                     idcg = sum(1.0 / np.log2(idx + 2) for idx in range(ideal_hits))
                     ndcg = dcg / idcg if idcg > 0 else 0.0
 
-                    m_key = f"precision@{k}"
-                    seed_user_metrics[m][m_key].append(prec)
-                    user_evaluations[m][m_key].append(prec)
+                    # Product-goal metrics
+                    n_weak = sum(1 for q in top_k if bool(set(qid_to_tags.get(q, [])) & crit_weak_topics))
+                    weak_cov = n_weak / float(k)
 
-                    m_key = f"recall@{k}"
-                    seed_user_metrics[m][m_key].append(rec)
-                    user_evaluations[m][m_key].append(rec)
+                    n_fit = sum(1 for q in top_k if qid_to_diff.get(q) in allowed_diffs)
+                    diff_fit = n_fit / float(k)
 
-                    m_key = f"hit_rate@{k}"
-                    seed_user_metrics[m][m_key].append(hit)
-                    user_evaluations[m][m_key].append(hit)
-
-                    m_key = f"ndcg@{k}"
-                    seed_user_metrics[m][m_key].append(ndcg)
-                    user_evaluations[m][m_key].append(ndcg)
+                    user_metric_map = {
+                        f"precision@{k}": prec,
+                        f"recall@{k}": rec,
+                        f"hit_rate@{k}": hit,
+                        f"ndcg@{k}": ndcg,
+                        f"weak_coverage@{k}": weak_cov,
+                        f"difficulty_fit@{k}": diff_fit,
+                    }
+                    for m_key, val in user_metric_map.items():
+                        seed_user_metrics[m][m_key].append(val)
+                        user_evaluations[m][m_key].append(val)
 
         evaluated_users_per_seed.append(evaluated_users_count)
         gt_items_per_user_per_seed.append(float(np.mean(gt_item_counts)) if gt_item_counts else 0.0)
@@ -352,7 +481,7 @@ def run_benchmark(
 
         if verbose:
             print(f"  Evaluated Users: {evaluated_users_count} | Avg GT items/user: {gt_items_per_user_per_seed[-1]:.2f}")
-            print(f"  Hybrid P@5: {seed_metrics['hybrid']['precision@5'][-1]:.4f} | Popularity P@5: {seed_metrics['popularity']['precision@5'][-1]:.4f} | Random P@5: {seed_metrics['random']['precision@5'][-1]:.4f}")
+            print(f"  Hybrid P@5: {seed_metrics['hybrid']['precision@5'][-1]:.4f} | Pop P@5: {seed_metrics['popularity']['precision@5'][-1]:.4f} | ALS P@5: {seed_metrics['als_only']['precision@5'][-1]:.4f}")
 
     # Compute aggregate summary
     summary_results: dict[str, Any] = {
@@ -364,6 +493,7 @@ def run_benchmark(
             "n_seeds": len(seeds),
             "seeds": seeds,
             "k_values": k_values,
+            "evaluate_on": evaluate_on,
             "evaluated_users_total": len(user_evaluations["hybrid"]["precision@5"]),
             "evaluated_users_mean_per_seed": float(np.mean(evaluated_users_per_seed)),
             "gt_items_per_user_mean": float(np.mean(gt_items_per_user_per_seed)),
@@ -380,7 +510,7 @@ def run_benchmark(
     for m in methods:
         summary_results["methods"][m] = {}
         for k in k_values:
-            for metric in ["precision", "recall", "hit_rate", "ndcg"]:
+            for metric in metric_names:
                 key = f"{metric}@{k}"
                 seed_vals = seed_metrics[m][key]
                 user_vals = user_evaluations[m][key]
@@ -391,19 +521,17 @@ def run_benchmark(
                     "ci_95": [ci_low, ci_high],
                 }
 
-    # Paired differences: hybrid - popularity, hybrid - random
-    for comp_method in ["popularity", "random"]:
+    # Paired differences: hybrid - popularity, hybrid - random, hybrid - als_only
+    for comp_method in ["popularity", "random", "als_only"]:
         pair_key = f"hybrid_minus_{comp_method}"
         summary_results["paired_differences"][pair_key] = {}
         for k in k_values:
-            for metric in ["precision", "recall", "hit_rate", "ndcg"]:
+            for metric in metric_names:
                 key = f"{metric}@{k}"
-                # Per seed paired difference
                 seed_diffs = [
                     h - p
                     for h, p in zip(seed_metrics["hybrid"][key], seed_metrics[comp_method][key])
                 ]
-                # Per user paired difference
                 user_diffs = [
                     h - p
                     for h, p in zip(user_evaluations["hybrid"][key], user_evaluations[comp_method][key])
@@ -443,6 +571,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-submissions", type=int, default=config.NUM_SUBMISSIONS)
     parser.add_argument("--output", type=str, default="results/bench_v1.json")
     parser.add_argument("--n-seeds", type=int, default=10)
+    parser.add_argument("--evaluate-on", choices=["test", "val"], default="test")
     args = parser.parse_args()
 
     seeds = list(range(1, args.n_seeds + 1))
@@ -454,5 +583,6 @@ if __name__ == "__main__":
         n_users=args.n_users,
         n_submissions=args.n_submissions,
         output_path=args.output,
+        evaluate_on=args.evaluate_on,
         verbose=True,
     )

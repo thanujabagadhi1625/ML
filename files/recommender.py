@@ -360,6 +360,7 @@ class HybridRecommender:
         self.cf_weight = config.HYBRID_CF_WEIGHT
         self.content_weight = config.HYBRID_CONTENT_WEIGHT
         self.weakness_weight = config.HYBRID_WEAKNESS_WEIGHT
+        self.popularity_weight = 0.0
 
     @staticmethod
     def _min_max(x: np.ndarray) -> np.ndarray:
@@ -373,6 +374,9 @@ class HybridRecommender:
         topic_profile: pd.DataFrame | None = None,
         user_submissions_df: pd.DataFrame | None = None,
         top_k: int | None = None,
+        enforce_diversity: bool = True,
+        popularity_weight: float | None = None,
+        popularity_scores: dict[int, float] | np.ndarray | None = None,
     ) -> pd.DataFrame:
         if top_k is not None:
             top_n = top_k
@@ -419,19 +423,44 @@ class HybridRecommender:
         cf_w = getattr(self, "cf_weight", config.HYBRID_CF_WEIGHT)
         cnt_w = getattr(self, "content_weight", config.HYBRID_CONTENT_WEIGHT)
         wk_w = getattr(self, "weakness_weight", config.HYBRID_WEAKNESS_WEIGHT)
+        pop_w = self.popularity_weight if popularity_weight is None else popularity_weight
 
-        if cf_available:
-            blended = (
-                cf_w * cf_norm
-                + cnt_w * content_norm
-                + wk_w * weakness_norm
-            )
+        if pop_w > 0.0 and popularity_scores is not None:
+            if isinstance(popularity_scores, dict):
+                pop_raw = self.questions_df["question_id"].map(popularity_scores).fillna(0.0).to_numpy(dtype=float)
+            else:
+                pop_raw = np.asarray(popularity_scores, dtype=float)
+            pop_norm = self._min_max(pop_raw)
+            rem_scale = max(0.0, 1.0 - pop_w)
+            cf_w_eff = cf_w * rem_scale
+            cnt_w_eff = cnt_w * rem_scale
+            wk_w_eff = wk_w * rem_scale
+            if cf_available:
+                blended = (
+                    cf_w_eff * cf_norm
+                    + cnt_w_eff * content_norm
+                    + wk_w_eff * weakness_norm
+                    + pop_w * pop_norm
+                )
+            else:
+                blended = (
+                    (cf_w_eff + cnt_w_eff) * content_norm
+                    + wk_w_eff * weakness_norm
+                    + pop_w * pop_norm
+                )
         else:
-            # Cold start: dynamically re-weight content and weakness
-            blended = (
-                (cf_w + cnt_w) * content_norm
-                + wk_w * weakness_norm
-            )
+            if cf_available:
+                blended = (
+                    cf_w * cf_norm
+                    + cnt_w * content_norm
+                    + wk_w * weakness_norm
+                )
+            else:
+                # Cold start: dynamically re-weight content and weakness
+                blended = (
+                    (cf_w + cnt_w) * content_norm
+                    + wk_w * weakness_norm
+                )
 
         # 5. Global difficulty suitability fallback if user has no signal
         if not np.any(blended > 0):
@@ -453,33 +482,36 @@ class HybridRecommender:
         candidates = candidates.sort_values("recommendation_score", ascending=False, kind="mergesort")
 
         # Enforce topic diversity (max 2 recommendations per primary tag)
-        selected_rows = []
-        selected_qids = set()
-        topic_counts: Dict[str, int] = {}
+        if enforce_diversity:
+            selected_rows = []
+            selected_qids = set()
+            topic_counts: Dict[str, int] = {}
 
-        for _, row in candidates.iterrows():
-            qid = row["question_id"]
-            if qid in selected_qids:
-                continue
+            for _, row in candidates.iterrows():
+                qid = row["question_id"]
+                if qid in selected_qids:
+                    continue
 
-            tags = row.get("topic_tags", [])
-            primary_tag = tags[0] if tags else "General"
+                tags = row.get("topic_tags", [])
+                primary_tag = tags[0] if tags else "General"
 
-            if topic_counts.get(primary_tag, 0) >= 2 and len(selected_rows) < top_n - 1:
-                continue
+                if topic_counts.get(primary_tag, 0) >= 2 and len(selected_rows) < top_n - 1:
+                    continue
 
-            selected_rows.append(row)
-            selected_qids.add(qid)
-            topic_counts[primary_tag] = topic_counts.get(primary_tag, 0) + 1
+                selected_rows.append(row)
+                selected_qids.add(qid)
+                topic_counts[primary_tag] = topic_counts.get(primary_tag, 0) + 1
 
-            if len(selected_rows) >= top_n:
-                break
+                if len(selected_rows) >= top_n:
+                    break
 
-        if len(selected_rows) < top_n:
-            remaining = candidates[~candidates["question_id"].isin(selected_qids)].head(top_n - len(selected_rows))
-            selected_rows.extend([r for _, r in remaining.iterrows()])
+            if len(selected_rows) < top_n:
+                remaining = candidates[~candidates["question_id"].isin(selected_qids)].head(top_n - len(selected_rows))
+                selected_rows.extend([r for _, r in remaining.iterrows()])
 
-        top_df = pd.DataFrame(selected_rows).head(top_n).copy()
+            top_df = pd.DataFrame(selected_rows).head(top_n).copy()
+        else:
+            top_df = candidates.head(top_n).copy()
 
         # Generate transparent, evidence-grounded reasons
         def _generate_reason(row):
