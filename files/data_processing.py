@@ -835,8 +835,18 @@ def _build_questions_from_export(submissions_df: pd.DataFrame) -> tuple[pd.DataF
             next_new_id += 1
             question_id_map[raw_key] = assigned_id
             desc = f"{row['title']} {row['difficulty']} problem statement"
+            raw_lid = row.get("leetcode_id") if "leetcode_id" in row else None
+            if raw_lid is None or pd.isna(raw_lid):
+                raw_lid = assigned_id
+            else:
+                try:
+                    raw_lid = int(float(raw_lid))
+                except (ValueError, TypeError):
+                    pass
             extra_questions.append({
                 "question_id": assigned_id,
+                "leetcode_id": raw_lid,
+                "slug": key_str if key_str else "",
                 "title": row["title"],
                 "description": desc,
                 "difficulty": row["difficulty"],
@@ -848,6 +858,14 @@ def _build_questions_from_export(submissions_df: pd.DataFrame) -> tuple[pd.DataF
         full_questions_df = pd.concat([canonical_df, pd.DataFrame(extra_questions)], ignore_index=True)
     else:
         full_questions_df = canonical_df.copy()
+
+    if "leetcode_id" in full_questions_df.columns:
+        try:
+            full_questions_df["leetcode_id"] = full_questions_df["leetcode_id"].fillna(full_questions_df["question_id"]).apply(
+                lambda x: int(float(x)) if pd.notna(x) and str(x).replace(".", "", 1).isdigit() else x
+            )
+        except Exception:
+            pass
 
     desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
     cols = [c for c in desired if c in full_questions_df.columns]

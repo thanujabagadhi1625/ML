@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 import config
 from data_processing import (
@@ -24,6 +24,18 @@ from data_processing import (
 from nlp_cluster import WeakTopicAnalyzer
 from predictor import ContestRatingPredictor
 from recommender import HybridRecommender
+
+
+def _format_leetcode_id(raw_id: Any) -> str:
+    if raw_id is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(raw_id):
+            return ""
+        return str(int(float(raw_id)))
+    except (ValueError, TypeError):
+        return str(raw_id)
 
 
 class RecommendationList(list):
@@ -120,9 +132,20 @@ class LeetCodeMentor:
 
         print("\n=== RECOMMENDED QUESTIONS ===")
         recs = report.get("recommended_questions", {})
-        if isinstance(recs, dict):
+        targeted = report.get("targeted_practice")
+        popular = report.get("popular_next_problems")
+        if targeted is None and hasattr(recs, "get"):
+            targeted = recs.get("targeted_practice")
+        if popular is None and hasattr(recs, "get"):
+            popular = recs.get("popular_next_problems")
+        if targeted is None and isinstance(recs, dict):
             targeted = recs.get("targeted_practice", [])
+        if popular is None and isinstance(recs, dict):
             popular = recs.get("popular_next_problems", [])
+
+        if targeted is not None or popular is not None:
+            targeted = targeted or []
+            popular = popular or []
 
             print("\n--- (a) Targeted Practice (Weakness-Aware) ---")
             if not targeted:
@@ -130,12 +153,14 @@ class LeetCodeMentor:
             else:
                 for i, item in enumerate(targeted, start=1):
                     lid = item.get("leetcode_id", item.get("question_id"))
+                    lid_str = _format_leetcode_id(lid)
                     slug = item.get("slug", "")
                     title = item.get("title", "")
                     url = f"https://leetcode.com/problems/{slug}/" if slug else ""
                     url_str = f" ({url})" if url else ""
+                    prefix = f"#{lid_str} " if lid_str else ""
                     print(
-                        f"{i}. #{lid} {title}{url_str} | "
+                        f"{i}. {prefix}{title}{url_str} | "
                         f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
                         f"ALS score={item.get('recommendation_score', 0):.4f} | "
                         f"Reason: {item.get('reason')}"
@@ -147,12 +172,14 @@ class LeetCodeMentor:
             else:
                 for i, item in enumerate(popular, start=1):
                     lid = item.get("leetcode_id", item.get("question_id"))
+                    lid_str = _format_leetcode_id(lid)
                     slug = item.get("slug", "")
                     title = item.get("title", "")
                     url = f"https://leetcode.com/problems/{slug}/" if slug else ""
                     url_str = f" ({url})" if url else ""
+                    prefix = f"#{lid_str} " if lid_str else ""
                     print(
-                        f"{i}. #{lid} {title}{url_str} | "
+                        f"{i}. {prefix}{title}{url_str} | "
                         f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
                         f"ALS score={item.get('recommendation_score', 0):.4f} | "
                         f"Reason: {item.get('reason')}"
@@ -163,12 +190,14 @@ class LeetCodeMentor:
             else:
                 for i, item in enumerate(recs, start=1):
                     lid = item.get("leetcode_id", item.get("question_id"))
+                    lid_str = _format_leetcode_id(lid)
                     slug = item.get("slug", "")
                     title = item.get("title", "")
                     url = f"https://leetcode.com/problems/{slug}/" if slug else ""
                     url_str = f" ({url})" if url else ""
+                    prefix = f"#{lid_str} " if lid_str else ""
                     print(
-                        f"{i}. #{lid} {title}{url_str} | "
+                        f"{i}. {prefix}{title}{url_str} | "
                         f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
                         f"score={item.get('recommendation_score', 0):.4f}"
                     )
@@ -202,6 +231,13 @@ class LeetCodeMentor:
         )
         targeted_records = two_recs["targeted_practice"].to_dict(orient="records")
         popular_records = two_recs["popular_next_problems"].to_dict(orient="records")
+        for r in targeted_records + popular_records:
+            lid = r.get("leetcode_id", r.get("question_id"))
+            if lid is not None:
+                try:
+                    r["leetcode_id"] = int(float(lid))
+                except (ValueError, TypeError):
+                    pass
         rec_list = RecommendationList(popular=popular_records, targeted=targeted_records)
 
         # 4. Predicted contest rating

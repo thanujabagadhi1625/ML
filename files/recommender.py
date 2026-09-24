@@ -593,6 +593,13 @@ class HybridRecommender:
         top_df["reason"] = top_df.apply(_generate_reason, axis=1)
         if "leetcode_id" not in top_df.columns:
             top_df["leetcode_id"] = top_df["question_id"]
+        else:
+            try:
+                top_df["leetcode_id"] = top_df["leetcode_id"].fillna(top_df["question_id"]).apply(
+                    lambda x: int(float(x)) if pd.notna(x) and str(x).replace(".", "", 1).isdigit() else x
+                )
+            except Exception:
+                pass
         if "slug" not in top_df.columns:
             top_df["slug"] = top_df["title"].astype(str).str.lower().str.replace(r"[^a-z0-9]+", "-", regex=True).str.strip("-")
         return top_df[["question_id", "leetcode_id", "slug", "title", "difficulty", "topic_tags", "recommendation_score", "reason"]]
@@ -724,6 +731,11 @@ class HybridRecommender:
             r_dict["recommendation_score"] = float(row.get("als_score", 0.0))
             if "leetcode_id" not in r_dict or pd.isna(r_dict["leetcode_id"]):
                 r_dict["leetcode_id"] = r_dict["question_id"]
+            else:
+                try:
+                    r_dict["leetcode_id"] = int(float(r_dict["leetcode_id"]))
+                except (ValueError, TypeError):
+                    pass
             if "slug" not in r_dict or not r_dict["slug"]:
                 r_dict["slug"] = str(r_dict.get("title", "")).lower().replace(" ", "-")
 
@@ -775,6 +787,23 @@ class HybridRecommender:
             exclude_question_ids=targeted_qids,
             return_two_lists=False,
         )
+
+        if not popular_df.empty:
+            popular_df = popular_df.copy()
+            def _popular_reason(row):
+                diff = row.get("difficulty", "Medium")
+                tags = row.get("topic_tags", [])
+                tag_str = f" in {', '.join(tags[:2])}" if tags else ""
+                return f"Collaborative filtering candidate ({diff} problem{tag_str}) aligning with peer learning paths."
+
+            popular_df["reason"] = popular_df.apply(_popular_reason, axis=1)
+            if "leetcode_id" in popular_df.columns:
+                try:
+                    popular_df["leetcode_id"] = popular_df["leetcode_id"].fillna(popular_df["question_id"]).apply(
+                        lambda x: int(float(x)) if pd.notna(x) and str(x).replace(".", "", 1).isdigit() else x
+                    )
+                except Exception:
+                    pass
 
         return {
             "targeted_practice": targeted_df,

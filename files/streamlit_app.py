@@ -20,6 +20,19 @@ from data_processing import load_leetcode_history_export, load_leetcode_history_
 from main import LeetCodeMentor
 
 
+def _format_leetcode_id(raw_id) -> str:
+    if raw_id is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(raw_id):
+            return ""
+        return str(int(float(raw_id)))
+    except (ValueError, TypeError):
+        return str(raw_id)
+
+
+
 st.set_page_config(page_title="LeetCode Mentor", layout="wide")
 
 st.title("LeetCode Mentor — Local Report Generator")
@@ -243,64 +256,72 @@ if "report" in st.session_state:
     st.subheader("Recommended Questions")
     recs = report.get("recommended_questions", {})
 
-    if isinstance(recs, dict):
+    targeted = report.get("targeted_practice")
+    popular = report.get("popular_next_problems")
+
+    if targeted is None and hasattr(recs, "targeted_practice"):
+        targeted = recs.targeted_practice
+    if popular is None and hasattr(recs, "popular_next_problems"):
+        popular = recs.popular_next_problems
+
+    if targeted is None and hasattr(recs, "get"):
+        targeted = recs.get("targeted_practice")
+    if popular is None and hasattr(recs, "get"):
+        popular = recs.get("popular_next_problems")
+
+    if targeted is None and isinstance(recs, dict):
         targeted = recs.get("targeted_practice", [])
+    if popular is None and isinstance(recs, dict):
         popular = recs.get("popular_next_problems", [])
 
-        st.markdown("### 🎯 (a) Targeted Practice")
-        st.caption("Unsolved questions targeting flagged Weak/Critical topics at or above your current level, ranked by peer relevance (ALS).")
-        if not targeted:
-            st.info("No weak or critical topics flagged, or no unsolved problems matching criteria.")
-        else:
-            for i, r in enumerate(targeted, start=1):
-                lid = r.get("leetcode_id", r.get("question_id"))
-                slug = r.get("slug", "")
-                title = r.get("title", "")
-                url = f"https://leetcode.com/problems/{slug}/" if slug else ""
-                link_md = f"[#{lid} {title}]({url})" if url else f"#{lid} {title}"
-                score = r.get("recommendation_score", 0.0)
-                reason = r.get("reason", "Targeted practice")
-                st.markdown(
-                    f"**{i}. {link_md}** `[{r.get('difficulty')}]`  \n"
-                    f"- **Tags**: {', '.join(r.get('topic_tags', []))}  \n"
-                    f"- **ALS Score**: `{score:.3f}` | **Reason**: {reason}"
-                )
+    if targeted is None and popular is None and isinstance(recs, list):
+        targeted = []
+        popular = recs
 
-        st.markdown("### 📈 (b) Popular Next Problems")
-        st.caption("Current ALS collaborative filtering ranking reflecting peer learning paths.")
-        if not popular:
-            st.info("No recommendations generated.")
-        else:
-            for i, r in enumerate(popular, start=1):
-                lid = r.get("leetcode_id", r.get("question_id"))
-                slug = r.get("slug", "")
-                title = r.get("title", "")
-                url = f"https://leetcode.com/problems/{slug}/" if slug else ""
-                link_md = f"[#{lid} {title}]({url})" if url else f"#{lid} {title}"
-                score = r.get("recommendation_score", 0.0)
-                reason = r.get("reason", "Popular next problem")
-                st.markdown(
-                    f"**{i}. {link_md}** `[{r.get('difficulty')}]`  \n"
-                    f"- **Tags**: {', '.join(r.get('topic_tags', []))}  \n"
-                    f"- **ALS Score**: `{score:.3f}` | **Reason**: {reason}"
-                )
-    elif isinstance(recs, list):
-        if not recs:
-            st.write("No recommendations generated.")
-        else:
-            for i, r in enumerate(recs, start=1):
-                lid = r.get("leetcode_id", r.get("question_id"))
-                slug = r.get("slug", "")
-                title = r.get("title", "")
-                url = f"https://leetcode.com/problems/{slug}/" if slug else ""
-                link_md = f"[#{lid} {title}]({url})" if url else f"#{lid} {title}"
-                score = r.get("recommendation_score", 0.0)
-                reason = r.get("reason", "Recommended practice")
-                st.markdown(
-                    f"**{i}. {link_md}** `[{r.get('difficulty')}]`  \n"
-                    f"- **Tags**: {', '.join(r.get('topic_tags', []))}  \n"
-                    f"- **Score**: `{score:.3f}` | **Reason**: {reason}"
-                )
+    targeted = targeted or []
+    popular = popular or []
+
+    st.markdown("### 🎯 (a) Targeted Practice")
+    st.caption("Unsolved questions targeting flagged Weak/Critical topics at or above your current level, ranked by peer relevance (ALS).")
+    if not targeted:
+        st.info("No weak or critical topics flagged, or no unsolved problems matching criteria.")
+    else:
+        for i, r in enumerate(targeted, start=1):
+            lid = r.get("leetcode_id", r.get("question_id"))
+            lid_str = _format_leetcode_id(lid)
+            slug = r.get("slug", "")
+            title = r.get("title", "")
+            url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+            prefix = f"#{lid_str} " if lid_str else ""
+            link_md = f"[{prefix}{title}]({url})" if url else f"{prefix}{title}"
+            score = r.get("recommendation_score", 0.0)
+            reason = r.get("reason", "Targeted practice")
+            st.markdown(
+                f"**{i}. {link_md}** `[{r.get('difficulty')}]`  \n"
+                f"- **Tags**: {', '.join(r.get('topic_tags', []))}  \n"
+                f"- **ALS Score**: `{score:.3f}` | **Reason**: {reason}"
+            )
+
+    st.markdown("### 📈 (b) Popular Next Problems")
+    st.caption("Current ALS collaborative filtering ranking reflecting peer learning paths.")
+    if not popular:
+        st.info("No recommendations generated.")
+    else:
+        for i, r in enumerate(popular, start=1):
+            lid = r.get("leetcode_id", r.get("question_id"))
+            lid_str = _format_leetcode_id(lid)
+            slug = r.get("slug", "")
+            title = r.get("title", "")
+            url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+            prefix = f"#{lid_str} " if lid_str else ""
+            link_md = f"[{prefix}{title}]({url})" if url else f"{prefix}{title}"
+            score = r.get("recommendation_score", 0.0)
+            reason = r.get("reason", "Popular next problem")
+            st.markdown(
+                f"**{i}. {link_md}** `[{r.get('difficulty')}]`  \n"
+                f"- **Tags**: {', '.join(r.get('topic_tags', []))}  \n"
+                f"- **ALS Score**: `{score:.3f}` | **Reason**: {reason}"
+            )
 
     st.subheader("Contest Rating Model Status")
     eval_info = report.get("model_evaluation", {})
