@@ -213,6 +213,25 @@ class TestRecommender(unittest.TestCase):
             for diff in targeted["difficulty"]:
                 self.assertIn(diff, allowed_diffs)
 
+            # 4. List (a) and List (b) are not identical
+            self.assertNotEqual(list(targeted["question_id"]), list(popular["question_id"]))
+
+    def test_two_lists_not_identical_when_flagged_topics_present(self):
+        """Assert list (a) and list (b) are not identical when user has flagged topics and catalogue coverage."""
+        from data_processing import load_leetcode_history_export, compute_user_topic_profile
+        demo_path = FILES_DIR / "demo" / "large_user.json"
+        if demo_path.exists():
+            u, q, s = load_leetcode_history_export(demo_path)
+            profile = compute_user_topic_profile(s, q, user_id=1)
+            rec = HybridRecommender(q, s)
+            two_lists = rec.recommend_two_lists(user_id=1, top_n=5, topic_profile=profile, user_submissions_df=s)
+            targeted_qids = list(two_lists["targeted_practice"]["question_id"])
+            popular_qids = list(two_lists["popular_next_problems"]["question_id"])
+            self.assertGreater(len(targeted_qids), 0)
+            self.assertGreater(len(popular_qids), 0)
+            self.assertNotEqual(targeted_qids, popular_qids)
+
 
 if __name__ == "__main__":
     unittest.main()
+

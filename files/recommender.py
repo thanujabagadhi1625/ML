@@ -408,6 +408,7 @@ class HybridRecommender:
         enforce_diversity: bool = True,
         popularity_weight: float | None = None,
         popularity_scores: dict[int, float] | np.ndarray | None = None,
+        exclude_question_ids: set | list | None = None,
         return_two_lists: bool = False,
     ) -> pd.DataFrame | dict[str, pd.DataFrame]:
         if return_two_lists:
@@ -516,10 +517,13 @@ class HybridRecommender:
         result = self.questions_df.copy()
         result["recommendation_score"] = blended
 
-        # NEVER recommend problems the user has already solved
-        candidates = result[~result["question_id"].isin(solved_ids)].copy()
+        # NEVER recommend problems the user has already solved, or explicitly excluded items
+        forbidden = set(solved_ids)
+        if exclude_question_ids:
+            forbidden |= set(exclude_question_ids)
+        candidates = result[~result["question_id"].isin(forbidden)].copy()
         if len(candidates) < top_n:
-            candidates = result.copy()
+            candidates = result[~result["question_id"].isin(solved_ids)].copy()
 
         candidates = candidates.sort_values("recommendation_score", ascending=False, kind="mergesort")
 
@@ -750,24 +754,26 @@ class HybridRecommender:
         if top_k is not None:
             top_n = top_k
 
-        # (b) Popular next problems
-        popular_df = self.recommend(
-            user_id=user_id,
-            top_n=top_n,
-            topic_profile=topic_profile,
-            user_submissions_df=user_submissions_df,
-            top_k=top_k,
-            enforce_diversity=enforce_diversity,
-            return_two_lists=False,
-        )
-
-        # (a) Targeted practice
+        # (a) Targeted practice: unsolved questions with Weak/Critical topic, user level or +1, <=2/topic, ALS ranked
         targeted_df = self.recommend_targeted_practice(
             user_id=user_id,
             top_n=top_n,
             topic_profile=topic_profile,
             user_submissions_df=user_submissions_df,
             top_k=top_k,
+        )
+
+        # (b) Popular next problems: current ALS ranking, excluding already-targeted questions
+        targeted_qids = set(targeted_df["question_id"].tolist()) if not targeted_df.empty else set()
+        popular_df = self.recommend(
+            user_id=user_id,
+            top_n=top_n,
+            topic_profile=None,
+            user_submissions_df=user_submissions_df,
+            top_k=top_k,
+            enforce_diversity=enforce_diversity,
+            exclude_question_ids=targeted_qids,
+            return_two_lists=False,
         )
 
         return {
