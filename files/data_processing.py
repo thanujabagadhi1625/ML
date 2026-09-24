@@ -1123,6 +1123,31 @@ class FeatureEngineer:
         return compute_user_topic_profile(self.submissions_df, self.questions_df, user_id=user_id)
 
 
+def check_declining_momentum(
+    overall_success_rate: float,
+    recent_success_rate: float,
+    recent_attempts: int,
+    min_recent_attempts: int = 8,
+    min_drop_percentage_points: float = 0.10,
+) -> bool:
+    """
+    Check if recent performance shows declining momentum.
+    Requires at least `min_recent_attempts` (default: 8) recent attempts and
+    a drop of at least `min_drop_percentage_points` (default: 0.10 or 10 percentage points)
+    versus the overall success rate.
+    """
+    if recent_attempts < min_recent_attempts:
+        return False
+
+    # Normalize if values were passed as percentages (e.g. 69, 68) instead of fractions (0.69, 0.68)
+    overall = overall_success_rate / 100.0 if overall_success_rate > 1.0 else overall_success_rate
+    recent = recent_success_rate / 100.0 if recent_success_rate > 1.0 else recent_success_rate
+    min_drop = min_drop_percentage_points / 100.0 if min_drop_percentage_points > 1.0 else min_drop_percentage_points
+
+    drop = overall - recent
+    return drop >= (min_drop - 1e-9)
+
+
 def compute_user_topic_profile(
     submissions_df: pd.DataFrame,
     questions_df: pd.DataFrame,
@@ -1135,7 +1160,7 @@ def compute_user_topic_profile(
     sub = submissions_df[submissions_df["user_id"] == user_id].copy()
     if sub.empty:
         return pd.DataFrame(columns=[
-            "topic", "attempts", "success_rate_pct", "success_rate_num", "exposure_level",
+            "topic", "attempts", "recent_attempts", "success_rate_pct", "success_rate_num", "exposure_level",
             "dominant_difficulty", "weakness_level", "risk_score", "unique_attempted", "unique_solved", "why_weak"
         ])
 
@@ -1153,13 +1178,19 @@ def compute_user_topic_profile(
 
     sub_tags["is_accepted"] = (sub_tags["status"] == "Accepted").astype(int)
 
+    # Convert timestamps if available and not yet datetime
+    if "timestamp" in sub_tags.columns and not pd.api.types.is_datetime64_any_dtype(sub_tags["timestamp"]):
+        sub_tags["timestamp"] = pd.to_datetime(sub_tags["timestamp"], errors="coerce")
+
     # Time-decay weight for recency (21-day half life)
-    if "timestamp" in sub_tags.columns and pd.api.types.is_datetime64_any_dtype(sub_tags["timestamp"]):
+    if "timestamp" in sub_tags.columns and pd.api.types.is_datetime64_any_dtype(sub_tags["timestamp"]) and not sub_tags["timestamp"].isna().all():
         now = sub_tags["timestamp"].max()
         days_ago = (now - sub_tags["timestamp"]).dt.total_seconds() / 86400.0
         sub_tags["_weight"] = np.power(0.5, days_ago / 21.0)
+        sub_tags["_is_recent"] = days_ago <= 42.0  # 2x half-life window (same as compute_recency_momentum)
     else:
         sub_tags["_weight"] = 1.0
+        sub_tags["_is_recent"] = True
 
     sub_tags["_weighted_correct"] = sub_tags["_weight"] * sub_tags["is_accepted"]
 
@@ -1195,6 +1226,7 @@ def compute_user_topic_profile(
 
         # Recency momentum in topic
         recency_success = group["_weighted_correct"].sum() / group["_weight"].sum() if group["_weight"].sum() > 0 else success_rate
+        recent_attempts = int(group["_is_recent"].sum()) if "_is_recent" in group.columns else attempts
 
         # Weakness Risk Score & Level Classification with Cold-Start Guard (attempts < 3)
         if attempts < 3:
@@ -1221,11 +1253,20 @@ def compute_user_topic_profile(
 
         success_pct = f"{int(round(success_rate * 100))}%"
 
+        # Check for declining momentum (requires at least 8 recent attempts and >= 10 pp drop)
+        is_declining = check_declining_momentum(
+            overall_success_rate=success_rate,
+            recent_success_rate=recency_success,
+            recent_attempts=recent_attempts,
+            min_recent_attempts=8,
+            min_drop_percentage_points=0.10,
+        )
+
         why_weak = []
         if weakness_level in ["Critical", "Weak"]:
             why_weak.append(f"{attempts} attempts across {unique_attempted} unique problems (Exposure: {exposure_level})")
             why_weak.append(f"{success_pct} overall success rate ({accepted_cnt} solved, {failed_cnt} failed)")
-            if recency_success < success_rate:
+            if is_declining:
                 why_weak.append(f"Recent performance ({int(round(recency_success * 100))}% success) shows declining momentum")
             if not easy_group.empty and easy_fail_rate > 0.3:
                 why_weak.append(f"Easy-difficulty accuracy ({int(round((1.0 - easy_fail_rate) * 100))}% success) indicates fundamental pattern gaps")
@@ -1233,6 +1274,7 @@ def compute_user_topic_profile(
         topic_records.append({
             "topic": topic_name,
             "attempts": attempts,
+            "recent_attempts": recent_attempts,
             "success_rate_pct": success_pct,
             "success_rate_num": success_rate,
             "exposure_level": exposure_level,

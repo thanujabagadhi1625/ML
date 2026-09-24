@@ -170,6 +170,24 @@ class TestDataProcessing(unittest.TestCase):
             min_holdout_time = pd.to_datetime(holdout_df["timestamp"]).min()
             self.assertLessEqual(max_hist_time, min_holdout_time)
 
+    def test_declining_momentum_rule(self):
+        """Verify declining momentum rule requires >= 8 recent attempts and >= 10 pp drop."""
+        from data_processing import check_declining_momentum
+
+        # 69% -> 68% (drop = 1 pp < 10 pp): not declining
+        self.assertFalse(check_declining_momentum(0.69, 0.68, recent_attempts=10))
+        self.assertFalse(check_declining_momentum(69, 68, recent_attempts=10))
+        self.assertFalse(check_declining_momentum(0.69, 0.68, recent_attempts=8))
+
+        # 71% -> 56% with 10 attempts (drop = 15 pp >= 10 pp, attempts = 10 >= 8): declining
+        self.assertTrue(check_declining_momentum(0.71, 0.56, recent_attempts=10))
+        self.assertTrue(check_declining_momentum(71, 56, recent_attempts=10))
+
+        # 71% -> 56% with 7 attempts (drop = 15 pp >= 10 pp, but attempts = 7 < 8): not declining
+        self.assertFalse(check_declining_momentum(0.71, 0.56, recent_attempts=7))
+        self.assertFalse(check_declining_momentum(71, 56, recent_attempts=0))
+
 
 if __name__ == "__main__":
     unittest.main()
+
