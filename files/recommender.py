@@ -545,7 +545,11 @@ class HybridRecommender:
             return f"Recommended {diff} problem for algorithmic practice."
 
         top_df["reason"] = top_df.apply(_generate_reason, axis=1)
-        return top_df[["question_id", "title", "difficulty", "topic_tags", "recommendation_score", "reason"]]
+        if "leetcode_id" not in top_df.columns:
+            top_df["leetcode_id"] = top_df["question_id"]
+        if "slug" not in top_df.columns:
+            top_df["slug"] = top_df["title"].astype(str).str.lower().str.replace(r"[^a-z0-9]+", "-", regex=True).str.strip("-")
+        return top_df[["question_id", "leetcode_id", "slug", "title", "difficulty", "topic_tags", "recommendation_score", "reason"]]
 
     # ---- Recommendation Evaluation ----------------------------------------------
     @staticmethod

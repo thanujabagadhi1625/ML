@@ -174,6 +174,24 @@ class TestFinalIntegrity(unittest.TestCase):
                     msg=f"Non-deterministic benchmark output for method {m}, metric {metric}: {v1} != {v2}",
                 )
 
+    def test_7_catalogue_real_leetcode_ids(self):
+        """Assert frontendQuestionId stored as leetcode_id for specified problems."""
+        import json
+        # Check loaded canonical DataFrame
+        slug_to_lid = dict(zip(self.questions_df["slug"], self.questions_df["leetcode_id"]))
+        self.assertEqual(slug_to_lid.get("two-sum"), 1)
+        self.assertEqual(slug_to_lid.get("basic-calculator-ii"), 227)
+        self.assertEqual(slug_to_lid.get("slowest-key"), 1629)
+        self.assertEqual(slug_to_lid.get("beautiful-array"), 932)
+
+        # Also check canonical_questions.json file directly
+        items = json.loads(config.CANONICAL_QUESTIONS_PATH.read_text(encoding="utf-8"))
+        json_slug_to_lid = {item["slug"]: item.get("leetcode_id") for item in items}
+        self.assertEqual(json_slug_to_lid.get("two-sum"), 1)
+        self.assertEqual(json_slug_to_lid.get("basic-calculator-ii"), 227)
+        self.assertEqual(json_slug_to_lid.get("slowest-key"), 1629)
+        self.assertEqual(json_slug_to_lid.get("beautiful-array"), 932)
+
 
 if __name__ == "__main__":
     unittest.main()

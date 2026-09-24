@@ -246,8 +246,13 @@ if "report" in st.session_state:
         for i, r in enumerate(recs, start=1):
             score = r.get("recommendation_score", 0.0)
             reason = r.get("reason", "Recommended practice")
+            lid = r.get("leetcode_id", r.get("question_id"))
+            slug = r.get("slug", "")
+            title = r.get("title", "")
+            url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+            link_md = f"[#{lid} {title}]({url})" if url else f"#{lid} {title}"
             st.markdown(
-                f"**{i}. Q{r.get('question_id')} | {r.get('title')}** `[{r.get('difficulty')}]`  \n"
+                f"**{i}. {link_md}** `[{r.get('difficulty')}]`  \n"
                 f"- **Tags**: {', '.join(r.get('topic_tags', []))}  \n"
                 f"- **Score**: `{score:.3f}` | **Reason**: {reason}"
             )

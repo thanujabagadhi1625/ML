@@ -67,7 +67,9 @@ def load_canonical_questions(n: int | None = None) -> pd.DataFrame:
             df = pd.DataFrame(records)
             if n is not None and n < len(df):
                 df = df.head(n)
-            return df[QUESTION_COLUMNS]
+            desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
+            cols = [c for c in desired if c in df.columns]
+            return df[cols]
         except Exception:
             pass
     # Fallback to template generation if canonical catalogue is unavailable
@@ -108,8 +110,10 @@ def _generate_template_synthetic_questions(n: int = config.NUM_QUESTIONS) -> pd.
 def generate_synthetic_questions(n: int = config.NUM_QUESTIONS) -> pd.DataFrame:
     """
     Returns canonical questions matching the question universe, with length n.
+    Conforms to QUESTION_COLUMNS schema contract.
     """
-    return load_canonical_questions(n)
+    q_df = load_canonical_questions(n)
+    return q_df[QUESTION_COLUMNS] if all(c in q_df.columns for c in QUESTION_COLUMNS) else q_df
 
 
 def generate_synthetic_users(
@@ -845,7 +849,9 @@ def _build_questions_from_export(submissions_df: pd.DataFrame) -> tuple[pd.DataF
     else:
         full_questions_df = canonical_df.copy()
 
-    return full_questions_df[QUESTION_COLUMNS], question_id_map
+    desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
+    cols = [c for c in desired if c in full_questions_df.columns]
+    return full_questions_df[cols], question_id_map
 
 
 def _build_users_from_export(submissions_df: pd.DataFrame) -> pd.DataFrame:
@@ -873,7 +879,9 @@ def load_leetcode_history_export(export_path: str | Path) -> tuple[pd.DataFrame,
     users_df = _build_users_from_export(submissions_df)
     users_df["user_id"] = users_df["user_id"].map(user_id_map)
 
-    return users_df[USER_COLUMNS], questions_df[QUESTION_COLUMNS], submissions_df[SUBMISSION_COLUMNS]
+    desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
+    q_cols = [c for c in desired if c in questions_df.columns]
+    return users_df[USER_COLUMNS], questions_df[q_cols], submissions_df[SUBMISSION_COLUMNS]
 
 
 def load_leetcode_history_records(records: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -892,7 +900,9 @@ def load_leetcode_history_records(records: list[dict]) -> tuple[pd.DataFrame, pd
     users_df = _build_users_from_export(submissions_df)
     users_df["user_id"] = users_df["user_id"].map(user_id_map)
 
-    return users_df[USER_COLUMNS], questions_df[QUESTION_COLUMNS], submissions_df[SUBMISSION_COLUMNS]
+    desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
+    q_cols = [c for c in desired if c in questions_df.columns]
+    return users_df[USER_COLUMNS], questions_df[q_cols], submissions_df[SUBMISSION_COLUMNS]
 
 
 def generate_synthetic_dataset_for_questions(

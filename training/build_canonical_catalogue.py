@@ -154,8 +154,15 @@ def build_canonical_catalogue() -> list[dict]:
             continue
 
         seen_slugs.add(raw_slug)
+        raw_leetcode_id = row.get("frontendQuestionId")
+        try:
+            leetcode_id = int(raw_leetcode_id)
+        except (ValueError, TypeError):
+            leetcode_id = None
+
         catalogue_items.append({
             "slug": raw_slug,
+            "leetcode_id": leetcode_id,
             "title": raw_title,
             "difficulty": difficulty,
             "topic_tags": mapped_tags,

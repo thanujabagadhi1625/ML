@@ -96,8 +96,13 @@ class LeetCodeMentor:
             print("No recommendations generated.")
         else:
             for i, item in enumerate(recommendations, start=1):
+                lid = item.get("leetcode_id", item.get("question_id"))
+                slug = item.get("slug", "")
+                title = item.get("title", "")
+                url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+                url_str = f" ({url})" if url else ""
                 print(
-                    f"{i}. Q{item.get('question_id')} | {item.get('title')} | "
+                    f"{i}. #{lid} {title}{url_str} | "
                     f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
                     f"score={item.get('recommendation_score', 0):.4f}"
                 )
