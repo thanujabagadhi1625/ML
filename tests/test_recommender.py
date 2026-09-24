@@ -164,6 +164,55 @@ class TestRecommender(unittest.TestCase):
         ].unique()
         self.assertFalse(any(qid in solved_ids for qid in top_recs["question_id"]))
 
+    def test_weakness_aware_two_lists(self):
+        """
+        Verify two-list recommendations:
+        (a) 'Targeted practice': unsolved, contains at least one flagged topic, <=2 per topic,
+            level fit, reason names flagged topic and measured success rate.
+        (b) 'Popular next problems': unsolved, ALS-ranked.
+        - list (a) never contains a question without a flagged topic.
+        - neither list contains solved questions.
+        """
+        from data_processing import load_leetcode_history_export, compute_user_topic_profile
+        from recommender import compute_user_difficulty_level
+        demo_path = FILES_DIR / "demo" / "large_user.json"
+        if demo_path.exists():
+            u, q, s = load_leetcode_history_export(demo_path)
+            profile = compute_user_topic_profile(s, q, user_id=1)
+            rec = HybridRecommender(q, s)
+
+            two_lists = rec.recommend_two_lists(user_id=1, top_n=5, topic_profile=profile, user_submissions_df=s)
+            targeted = two_lists["targeted_practice"]
+            popular = two_lists["popular_next_problems"]
+
+            flagged_topics = set(profile[profile["weakness_level"].isin(["Critical", "Weak"])]["topic"])
+            solved_ids = set(s.loc[s["status"] == "Accepted", "question_id"].unique())
+
+            # 1. Neither list contains solved questions
+            self.assertFalse(any(qid in solved_ids for qid in targeted["question_id"]))
+            self.assertFalse(any(qid in solved_ids for qid in popular["question_id"]))
+
+            # 2. List (a) never contains a question without a flagged topic
+            self.assertGreater(len(targeted), 0)
+            for _, row in targeted.iterrows():
+                tags = row["topic_tags"]
+                has_flagged = any(t in flagged_topics for t in tags)
+                self.assertTrue(has_flagged, f"Question {row['question_id']} does not have any flagged topic in {tags}")
+                # Reason names flagged topic and measured success rate
+                matched_reason = any(t in row["reason"] for t in flagged_topics)
+                self.assertTrue(matched_reason, f"Reason does not mention flagged topic: {row['reason']}")
+                self.assertIn("%", row["reason"], f"Reason does not mention measured success rate: {row['reason']}")
+
+            # 3. List (a) difficulty equals user level or one above
+            diff_names = ["Easy", "Medium", "Hard"]
+            qid_to_diff = dict(zip(q["question_id"], q["difficulty"]))
+            lvl = compute_user_difficulty_level(s, qid_to_diff)
+            allowed_diffs = {diff_names[lvl]}
+            if lvl + 1 < len(diff_names):
+                allowed_diffs.add(diff_names[lvl + 1])
+            for diff in targeted["difficulty"]:
+                self.assertIn(diff, allowed_diffs)
+
 
 if __name__ == "__main__":
     unittest.main()

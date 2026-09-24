@@ -26,6 +26,33 @@ from predictor import ContestRatingPredictor
 from recommender import HybridRecommender
 
 
+class RecommendationList(list):
+    """
+    List subclass holding (b) 'Popular next problems' as the primary sequence
+    while providing dict-like access to (a) 'Targeted practice' and (b) 'Popular next problems'.
+    """
+    def __init__(self, popular: list, targeted: list | None = None):
+        super().__init__(popular)
+        self.targeted_practice = targeted or []
+        self.popular_next_problems = popular
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "targeted_practice":
+            return self.targeted_practice
+        if key == "popular_next_problems":
+            return self.popular_next_problems
+        return default
+
+    def __getitem__(self, item: Any) -> Any:
+        if isinstance(item, str):
+            if item == "targeted_practice":
+                return self.targeted_practice
+            if item == "popular_next_problems":
+                return self.popular_next_problems
+            raise KeyError(item)
+        return super().__getitem__(item)
+
+
 class LeetCodeMentor:
     """Facade class -- loads pre-trained models and serves per-user reports."""
 
@@ -92,20 +119,59 @@ class LeetCodeMentor:
                 )
 
         print("\n=== RECOMMENDED QUESTIONS ===")
-        if not recommendations:
-            print("No recommendations generated.")
-        else:
-            for i, item in enumerate(recommendations, start=1):
-                lid = item.get("leetcode_id", item.get("question_id"))
-                slug = item.get("slug", "")
-                title = item.get("title", "")
-                url = f"https://leetcode.com/problems/{slug}/" if slug else ""
-                url_str = f" ({url})" if url else ""
-                print(
-                    f"{i}. #{lid} {title}{url_str} | "
-                    f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
-                    f"score={item.get('recommendation_score', 0):.4f}"
-                )
+        recs = report.get("recommended_questions", {})
+        if isinstance(recs, dict):
+            targeted = recs.get("targeted_practice", [])
+            popular = recs.get("popular_next_problems", [])
+
+            print("\n--- (a) Targeted Practice (Weakness-Aware) ---")
+            if not targeted:
+                print("No targeted practice problems (no weak/critical topics flagged).")
+            else:
+                for i, item in enumerate(targeted, start=1):
+                    lid = item.get("leetcode_id", item.get("question_id"))
+                    slug = item.get("slug", "")
+                    title = item.get("title", "")
+                    url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+                    url_str = f" ({url})" if url else ""
+                    print(
+                        f"{i}. #{lid} {title}{url_str} | "
+                        f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
+                        f"ALS score={item.get('recommendation_score', 0):.4f} | "
+                        f"Reason: {item.get('reason')}"
+                    )
+
+            print("\n--- (b) Popular Next Problems (ALS Collaborative Filtering) ---")
+            if not popular:
+                print("No popular recommendations generated.")
+            else:
+                for i, item in enumerate(popular, start=1):
+                    lid = item.get("leetcode_id", item.get("question_id"))
+                    slug = item.get("slug", "")
+                    title = item.get("title", "")
+                    url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+                    url_str = f" ({url})" if url else ""
+                    print(
+                        f"{i}. #{lid} {title}{url_str} | "
+                        f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
+                        f"ALS score={item.get('recommendation_score', 0):.4f} | "
+                        f"Reason: {item.get('reason')}"
+                    )
+        elif isinstance(recs, list):
+            if not recs:
+                print("No recommendations generated.")
+            else:
+                for i, item in enumerate(recs, start=1):
+                    lid = item.get("leetcode_id", item.get("question_id"))
+                    slug = item.get("slug", "")
+                    title = item.get("title", "")
+                    url = f"https://leetcode.com/problems/{slug}/" if slug else ""
+                    url_str = f" ({url})" if url else ""
+                    print(
+                        f"{i}. #{lid} {title}{url_str} | "
+                        f"{item.get('difficulty')} | tags={item.get('topic_tags')} | "
+                        f"score={item.get('recommendation_score', 0):.4f}"
+                    )
 
         print("\n=== MODEL METRICS ===")
         metrics = report.get("model_evaluation", {})
@@ -124,14 +190,19 @@ class LeetCodeMentor:
         failed = self.feature_engineer.get_failed_submissions_with_text(user_id=user_id)
         weak_topics = self.topic_analyzer.analyze_user_weak_topics(failed)
 
-        # 3. Recommended questions (profile-guided & evidence-grounded via ALS fold-in + content)
+        # 3. Recommended questions: two clearly labelled lists
+        #    (a) "Targeted practice": unsolved, Weak/Critical topics, user level or +1, <=2/topic, ALS-ranked
+        #    (b) "Popular next problems": current ALS ranking
         user_subs = self.submissions_df[self.submissions_df["user_id"] == user_id]
-        recommendations = self.recommender.recommend(
+        two_recs = self.recommender.recommend_two_lists(
             user_id=user_id,
             topic_profile=topic_profile_df,
             user_submissions_df=user_subs,
             top_k=kwargs.get("top_k", 5),
-        ).to_dict(orient="records")
+        )
+        targeted_records = two_recs["targeted_practice"].to_dict(orient="records")
+        popular_records = two_recs["popular_next_problems"].to_dict(orient="records")
+        rec_list = RecommendationList(popular=popular_records, targeted=targeted_records)
 
         # 4. Predicted contest rating
         user_features = self.feature_matrix[self.feature_matrix["user_id"] == user_id]
@@ -165,7 +236,9 @@ class LeetCodeMentor:
             "diagnostics": diagnostics,
             "topic_profile": topic_profile_records,
             "weak_subtopics": weak_topics,
-            "recommended_questions": recommendations,
+            "recommended_questions": rec_list,
+            "targeted_practice": targeted_records,
+            "popular_next_problems": popular_records,
             "predicted_contest_rating": round(predicted_rating, 1) if predicted_rating is not None else None,
             "model_evaluation": eval_dict,
         }

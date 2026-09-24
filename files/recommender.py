@@ -32,6 +32,37 @@ from scipy import sparse
 import config
 
 # ==============================================================================
+# Helper: User Difficulty Level Calculation
+# ==============================================================================
+
+def compute_user_difficulty_level(u_hist: pd.DataFrame, qid_to_diff: dict[int, str] | None = None) -> int:
+    """
+    Computes user level: highest difficulty with >= 3 history attempts and >= 50% accuracy.
+    Defaults to Easy (0).
+    Returns level index: 0 (Easy), 1 (Medium), 2 (Hard).
+    """
+    if u_hist.empty:
+        return 0
+
+    if "difficulty" in u_hist.columns and u_hist["difficulty"].notna().any():
+        hist_diffs = u_hist["difficulty"]
+    elif qid_to_diff is not None:
+        hist_diffs = u_hist["question_id"].map(qid_to_diff)
+    else:
+        return 0
+
+    for lvl_idx, diff_name in [(2, "Hard"), (1, "Medium"), (0, "Easy")]:
+        diff_mask = hist_diffs == diff_name
+        attempts = int(diff_mask.sum())
+        if attempts >= 3:
+            accepted = int((diff_mask & (u_hist["status"] == "Accepted")).sum())
+            acc = accepted / float(attempts)
+            if acc >= 0.50:
+                return lvl_idx
+    return 0
+
+
+# ==============================================================================
 # 1. Implicit-Feedback ALS Matrix Factorization with New-User Fold-In
 # ==============================================================================
 
@@ -377,7 +408,18 @@ class HybridRecommender:
         enforce_diversity: bool = True,
         popularity_weight: float | None = None,
         popularity_scores: dict[int, float] | np.ndarray | None = None,
-    ) -> pd.DataFrame:
+        return_two_lists: bool = False,
+    ) -> pd.DataFrame | dict[str, pd.DataFrame]:
+        if return_two_lists:
+            return self.recommend_two_lists(
+                user_id=user_id,
+                top_n=top_n,
+                topic_profile=topic_profile,
+                user_submissions_df=user_submissions_df,
+                top_k=top_k,
+                enforce_diversity=enforce_diversity,
+            )
+
         if top_k is not None:
             top_n = top_k
         subs = user_submissions_df if user_submissions_df is not None else self.submissions_df
@@ -550,6 +592,188 @@ class HybridRecommender:
         if "slug" not in top_df.columns:
             top_df["slug"] = top_df["title"].astype(str).str.lower().str.replace(r"[^a-z0-9]+", "-", regex=True).str.strip("-")
         return top_df[["question_id", "leetcode_id", "slug", "title", "difficulty", "topic_tags", "recommendation_score", "reason"]]
+
+    def recommend_targeted_practice(
+        self,
+        user_id: int,
+        top_n: int = config.TOP_N_RECOMMENDATIONS,
+        topic_profile: pd.DataFrame | None = None,
+        user_submissions_df: pd.DataFrame | None = None,
+        top_k: int | None = None,
+        cf_scores: np.ndarray | None = None,
+    ) -> pd.DataFrame:
+        """
+        List (a) 'Targeted practice':
+        - Unsolved questions with at least one Weak/Critical topic.
+        - Difficulty equal to user's level or one above.
+        - At most 2 per topic.
+        - Ranked by ALS score within that candidate set.
+        - Reason text names the flagged topic and its measured success rate.
+        """
+        if top_k is not None:
+            top_n = top_k
+
+        subs = user_submissions_df if user_submissions_df is not None else self.submissions_df
+        user_subs = subs[subs["user_id"] == user_id]
+
+        solved_ids = user_subs.loc[user_subs["status"] == "Accepted", "question_id"].unique().tolist()
+
+        if topic_profile is None and not user_subs.empty:
+            from data_processing import compute_user_topic_profile
+            topic_profile = compute_user_topic_profile(user_subs, self.questions_df, user_id=user_id)
+
+        # Flagged Weak/Critical topics
+        flagged_topics_info: dict[str, dict] = {}
+        if topic_profile is not None and not topic_profile.empty:
+            for _, tp_row in topic_profile.iterrows():
+                w_lvl = str(tp_row.get("weakness_level", "Neutral"))
+                if w_lvl in ["Critical", "Weak"]:
+                    t_name = str(tp_row["topic"])
+                    succ_pct = tp_row.get("success_rate_pct")
+                    if not succ_pct and "success_rate_num" in tp_row:
+                        succ_pct = f"{int(round(float(tp_row['success_rate_num']) * 100))}%"
+                    elif not succ_pct:
+                        succ_pct = "0%"
+                    flagged_topics_info[t_name] = {
+                        "topic": t_name,
+                        "weakness_level": w_lvl,
+                        "success_rate_pct": succ_pct,
+                        "risk_score": float(tp_row.get("risk_score", 0.0)),
+                    }
+
+        cols = ["question_id", "leetcode_id", "slug", "title", "difficulty", "topic_tags", "recommendation_score", "reason"]
+
+        if not flagged_topics_info:
+            return pd.DataFrame(columns=cols)
+
+        # Determine user difficulty level
+        qid_to_diff = dict(zip(self.questions_df["question_id"], self.questions_df["difficulty"]))
+        user_level = compute_user_difficulty_level(user_subs, qid_to_diff)
+        diff_names = ["Easy", "Medium", "Hard"]
+        allowed_diffs = [diff_names[user_level]]
+        if user_level + 1 < len(diff_names):
+            allowed_diffs.append(diff_names[user_level + 1])
+
+        # Filter candidate questions:
+        # 1. Strictly unsolved
+        candidates = self.questions_df[~self.questions_df["question_id"].isin(solved_ids)].copy()
+        # 2. Difficulty equal to user's level or one above
+        candidates = candidates[candidates["difficulty"].isin(allowed_diffs)].copy()
+        # 3. Must contain at least one flagged topic
+        def _has_flagged_topic(tags):
+            return any(t in flagged_topics_info for t in tags) if tags else False
+
+        candidates = candidates[candidates["topic_tags"].apply(_has_flagged_topic)].copy()
+
+        if candidates.empty:
+            return pd.DataFrame(columns=cols)
+
+        # 4. Ranked by ALS score within that candidate set
+        if cf_scores is None:
+            cf_scores = np.zeros(len(self.questions_df))
+            if self.als is not None and self.als.item_factors is not None and not user_subs.empty:
+                interactions = build_interaction_matrix(user_subs)
+                qids = interactions["question_id"].tolist()
+                weights = interactions["weight"].tolist()
+                raw_cf, cf_available = self.als.fold_in_user(qids, weights)
+                if cf_available:
+                    item_ids = self.als.item_ids_ordered()
+                    cf_score_by_qid = dict(zip(item_ids, raw_cf))
+                    cf_scores = self.questions_df["question_id"].map(cf_score_by_qid).fillna(0.0).to_numpy()
+
+        qid_to_als = dict(zip(self.questions_df["question_id"], cf_scores))
+        candidates["als_score"] = candidates["question_id"].map(qid_to_als).fillna(0.0)
+        candidates = candidates.sort_values("als_score", ascending=False, kind="mergesort")
+
+        # 5. At most 2 per topic, reason names flagged topic and measured success rate
+        topic_counts: dict[str, int] = {}
+        selected_rows = []
+
+        for _, row in candidates.iterrows():
+            tags = row.get("topic_tags", [])
+            eligible = [t for t in tags if t in flagged_topics_info and topic_counts.get(t, 0) < 2]
+            if not eligible:
+                continue
+
+            # Prioritize eligible topic with highest risk / Critical over Weak
+            chosen_topic = max(
+                eligible,
+                key=lambda t: (
+                    1 if flagged_topics_info[t]["weakness_level"] == "Critical" else 0,
+                    flagged_topics_info[t]["risk_score"],
+                ),
+            )
+            topic_counts[chosen_topic] = topic_counts.get(chosen_topic, 0) + 1
+
+            t_info = flagged_topics_info[chosen_topic]
+            succ_pct = t_info["success_rate_pct"]
+            w_lvl = t_info["weakness_level"]
+            diff = row.get("difficulty", "Medium")
+
+            reason = (
+                f"{chosen_topic} is currently flagged as {w_lvl} ({succ_pct} success rate). "
+                f"Recommended {diff} problem for targeted weakness reinforcement."
+            )
+
+            r_dict = row.to_dict()
+            r_dict["reason"] = reason
+            r_dict["recommendation_score"] = float(row.get("als_score", 0.0))
+            if "leetcode_id" not in r_dict or pd.isna(r_dict["leetcode_id"]):
+                r_dict["leetcode_id"] = r_dict["question_id"]
+            if "slug" not in r_dict or not r_dict["slug"]:
+                r_dict["slug"] = str(r_dict.get("title", "")).lower().replace(" ", "-")
+
+            selected_rows.append(r_dict)
+            if len(selected_rows) >= top_n:
+                break
+
+        res_df = pd.DataFrame(selected_rows)
+        if res_df.empty:
+            return pd.DataFrame(columns=cols)
+        return res_df[cols]
+
+    def recommend_two_lists(
+        self,
+        user_id: int,
+        top_n: int = config.TOP_N_RECOMMENDATIONS,
+        topic_profile: pd.DataFrame | None = None,
+        user_submissions_df: pd.DataFrame | None = None,
+        top_k: int | None = None,
+        enforce_diversity: bool = True,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Outputs two clearly labelled lists:
+          (a) 'Targeted practice': Unsolved questions covering at least one Weak/Critical topic,
+              calibrated to user's level or one above, at most 2 per topic, ranked by ALS score.
+          (b) 'Popular next problems': Current ALS ranking, labelled as such.
+        """
+        if top_k is not None:
+            top_n = top_k
+
+        # (b) Popular next problems
+        popular_df = self.recommend(
+            user_id=user_id,
+            top_n=top_n,
+            topic_profile=topic_profile,
+            user_submissions_df=user_submissions_df,
+            top_k=top_k,
+            enforce_diversity=enforce_diversity,
+            return_two_lists=False,
+        )
+
+        # (a) Targeted practice
+        targeted_df = self.recommend_targeted_practice(
+            user_id=user_id,
+            top_n=top_n,
+            topic_profile=topic_profile,
+            user_submissions_df=user_submissions_df,
+            top_k=top_k,
+        )
+
+        return {
+            "targeted_practice": targeted_df,
+            "popular_next_problems": popular_df,
+        }
 
     # ---- Recommendation Evaluation ----------------------------------------------
     @staticmethod

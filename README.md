@@ -279,6 +279,13 @@ Candidate questions covering topics flagged as `Critical` or `Weak` receive an a
 - **Topic Diversity**: Enforces a maximum of 2 recommendations per primary topic tag.
 - **Explainable Rationale**: Generates transparent reasons explaining why each problem was recommended (e.g., targeted remediation, peer learning path).
 
+### Recommendation Output: Two Clearly Labelled Lists
+Recommendations are presented in two distinct lists:
+- **(a) "Targeted practice"**: Unsolved questions covering at least one flagged `Weak` or `Critical` topic, difficulty equal to the user's level or one above, at most 2 per topic, ranked by ALS score within that candidate set; the reason text explicitly names the flagged topic and its measured success rate.
+- **(b) "Popular next problems"**: The current collaborative filtering (ALS) ranking reflecting peer learning paths.
+
+Offline metrics (Precision/Recall/NDCG) apply to list (b) only; list (a) satisfies weak-topic targeting by construction; its effect on real learning is not measured.
+
 ---
 
 ## Contest Performance Estimation
