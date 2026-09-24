@@ -187,7 +187,40 @@ class TestDataProcessing(unittest.TestCase):
         self.assertFalse(check_declining_momentum(0.71, 0.56, recent_attempts=7))
         self.assertFalse(check_declining_momentum(71, 56, recent_attempts=0))
 
+    def test_difficulty_column_shares(self):
+        """Verify Difficulty column computes share of Easy/Medium/Hard attempts (e.g. E20% M65% H15%)."""
+        from data_processing import compute_user_topic_profile
+
+        # 20 Easy, 65 Medium, 15 Hard = 100 attempts -> "E20% M65% H15%"
+        q_records = []
+        for i in range(20):
+            q_records.append({"question_id": 100 + i, "difficulty": "Easy", "topic_tags": ["Array"]})
+        for i in range(65):
+            q_records.append({"question_id": 200 + i, "difficulty": "Medium", "topic_tags": ["Array"]})
+        for i in range(15):
+            q_records.append({"question_id": 300 + i, "difficulty": "Hard", "topic_tags": ["Array"]})
+        q_df = pd.DataFrame(q_records)
+
+        s_records = []
+        for i, row in enumerate(q_records):
+            s_records.append({
+                "submission_id": i + 1,
+                "user_id": 1,
+                "question_id": row["question_id"],
+                "status": "Accepted" if i % 2 == 0 else "Wrong Answer",
+                "difficulty": row["difficulty"],
+                "topic_tags": row["topic_tags"],
+            })
+        s_df = pd.DataFrame(s_records)
+
+        profile = compute_user_topic_profile(s_df, q_df, user_id=1)
+        self.assertFalse(profile.empty)
+        array_row = profile[profile["topic"] == "Array"].iloc[0]
+        self.assertEqual(array_row["dominant_difficulty"], "E20% M65% H15%")
+        self.assertEqual(array_row["difficulty_share"], "E20% M65% H15%")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -1212,15 +1212,21 @@ def compute_user_topic_profile(
         else:
             exposure_level = "High"
 
-        # Difficulty distribution & dominant difficulty
-        diff_counts = group["difficulty"].value_counts()
-        dominant_diff = diff_counts.index[0] if not diff_counts.empty else "Medium"
-
-        # Difficulty weighting (failing Easy carries 1.3x risk, Hard 0.8x)
+        # Difficulty share computation: share of Easy/Medium/Hard attempts in topic
         easy_group = group[group["difficulty"] == "Easy"]
         med_group = group[group["difficulty"] == "Medium"]
         hard_group = group[group["difficulty"] == "Hard"]
 
+        easy_cnt = len(easy_group)
+        med_cnt = len(med_group)
+        hard_cnt = len(hard_group)
+        pe = int(round(100.0 * easy_cnt / attempts)) if attempts > 0 else 0
+        pm = int(round(100.0 * med_cnt / attempts)) if attempts > 0 else 0
+        ph = int(round(100.0 * hard_cnt / attempts)) if attempts > 0 else 0
+        diff_share = f"E{pe}% M{pm}% H{ph}%"
+        dominant_diff = diff_share
+
+        # Difficulty weighting (failing Easy carries 1.3x risk, Hard 0.8x)
         easy_fail_rate = 1.0 - (easy_group["is_accepted"].mean() if not easy_group.empty else 1.0)
         med_fail_rate = 1.0 - (med_group["is_accepted"].mean() if not med_group.empty else 1.0)
 
@@ -1279,6 +1285,7 @@ def compute_user_topic_profile(
             "success_rate_num": success_rate,
             "exposure_level": exposure_level,
             "dominant_difficulty": dominant_diff,
+            "difficulty_share": diff_share,
             "weakness_level": weakness_level,
             "risk_score": risk_score,
             "unique_attempted": unique_attempted,
