@@ -3,15 +3,15 @@
   "dataset_version": "kaysss_leetcode_canonical_v3",
   "generator_version": "v3",
   "catalogue_source": "Hugging Face kaysss/leetcode-problem-set (MIT License)",
-  "training_timestamp": "2026-09-20T08:44:54.217186+00:00",
+  "training_timestamp": "2026-11-01T15:23:50.636324+00:00",
   "random_seed": 42,
-  "n_synthetic_users": 2000,
+  "n_synthetic_users": 5000,
   "n_questions": 2630,
-  "n_submissions": 193920,
+  "n_submissions": 356571,
   "user_split": {
-    "train_users": 1400,
-    "val_users": 300,
-    "test_users": 300
+    "train_users": 3500,
+    "val_users": 750,
+    "test_users": 750
   },
   "feature_names": [
     "total_submissions",
@@ -43,50 +43,87 @@
     "n_jobs": -1
   },
   "als_hyperparameters": {
-    "latent_dim": 16,
-    "reg_lambda": 50.0,
+    "latent_dim": 24,
+    "reg_lambda": 100.0,
     "confidence_alpha": 5.0,
     "epochs": 15
   },
   "hybrid_blending_weights": {
-    "cf_weight": 1.0,
-    "content_weight": 0.0,
-    "weakness_weight": 0.0
+    "cf_weight": 0.5,
+    "content_weight": 0.25,
+    "weakness_weight": 0.25,
+    "mode": "production_default",
+    "discovery_mode": {
+      "cf_weight": 0.0,
+      "content_weight": 0.8,
+      "weakness_weight": 0.2,
+      "description": "Optional discovery mode for high long-tail exploration and semantic weakness reinforcement"
+    }
   },
   "live_test_evaluation": {
     "rating_model_test": {
-      "rmse": 130.09,
-      "mae": 86.88,
-      "r2": 0.715
+      "rmse": 131.46,
+      "mae": 83.84,
+      "r2": 0.684
     },
     "recommendation_test": {
-      "precision_at_5": 0.1058,
-      "recall_at_5": 0.0757,
-      "hit_rate_at_5": 0.4334,
-      "ndcg_at_5": 0.1271
+      "precision_at_5": 0.0192,
+      "recall_at_5": 0.01516,
+      "hit_rate_at_5": 0.08916,
+      "ndcg_at_5": 0.02353,
+      "tail_hit_rate_at_5": 0.0,
+      "ips_ndcg_at_5": 0.01026,
+      "tail_share_at_5": 0.00768
     },
     "weak_topic_detection_test": {
-      "precision": 0.6344,
-      "recall": 0.6051,
-      "f1": 0.5904
+      "precision": 0.6136,
+      "recall": 0.6217,
+      "f1": 0.5913
+    },
+    "discovery_mode_test": {
+      "precision_at_5": 0.00521,
+      "recall_at_5": 0.00652,
+      "hit_rate_at_5": 0.02606,
+      "ndcg_at_5": 0.0069,
+      "tail_hit_rate_at_5": 0.01156,
+      "tail_precision_at_5": 0.00231,
+      "tail_recall_at_5": 0.00357,
+      "tail_ndcg_at_5": 0.0026,
+      "ips_ndcg_at_5": 0.00545,
+      "tail_share_at_5": 0.68313
     }
   },
   "evaluation_metrics": {
     "rating_model_test": {
-      "rmse": 130.09,
-      "mae": 86.88,
-      "r2": 0.715
+      "rmse": 131.46,
+      "mae": 83.84,
+      "r2": 0.684
     },
     "recommendation_test": {
-      "precision_at_5": 0.1058,
-      "recall_at_5": 0.0757,
-      "hit_rate_at_5": 0.4334,
-      "ndcg_at_5": 0.1271
+      "precision_at_5": 0.0192,
+      "recall_at_5": 0.01516,
+      "hit_rate_at_5": 0.08916,
+      "ndcg_at_5": 0.02353,
+      "tail_hit_rate_at_5": 0.0,
+      "ips_ndcg_at_5": 0.01026,
+      "tail_share_at_5": 0.00768
     },
     "weak_topic_detection_test": {
-      "precision": 0.6344,
-      "recall": 0.6051,
-      "f1": 0.5904
+      "precision": 0.6136,
+      "recall": 0.6217,
+      "f1": 0.5913
+    },
+    "discovery_mode_test": {
+      "precision_at_5": 0.00521,
+      "recall_at_5": 0.00652,
+      "hit_rate_at_5": 0.02606,
+      "ndcg_at_5": 0.0069,
+      "tail_hit_rate_at_5": 0.01156,
+      "tail_precision_at_5": 0.00231,
+      "tail_recall_at_5": 0.00357,
+      "tail_ndcg_at_5": 0.0026,
+      "ips_ndcg_at_5": 0.00545,
+      "tail_share_at_5": 0.68313
     }
   },
   "benchmark_10_seeds": {
@@ -1614,90 +1651,90 @@
   },
   "tuning_summary": {
     "chosen_als_params": {
-      "n_factors": 16,
+      "n_factors": 24,
       "alpha": 5.0,
-      "reg_lambda": 50.0,
+      "reg_lambda": 100.0,
       "n_epochs": 15
     },
     "chosen_hybrid_weights": {
-      "cf_weight": 1.0,
-      "content_weight": 0.0,
-      "weakness_weight": 0.0
+      "cf_weight": 0.0,
+      "content_weight": 0.8,
+      "weakness_weight": 0.2
     },
     "validation_tuning_summary": {
-      "val_ndcg@10_als_only": 0.12147,
-      "val_ndcg@10_hybrid": 0.10745,
+      "val_ndcg@10_als_only": 0.03122,
+      "val_ndcg@5_hybrid": 0.00547,
+      "val_tail_ndcg@5_hybrid": 0.00395,
       "seeds_used": [
         1,
-        2,
-        3
+        2
       ],
       "split": "validation_users_only"
     },
     "test_evaluation_summary": {
-      "evaluated_users_total": 895,
+      "evaluated_users_total": 588,
       "hybrid_precision@5": {
-        "mean": 0.10188,
-        "std": 0.01141,
+        "mean": 0.0034,
+        "std": 5e-05,
         "ci_95": [
-          0.09274,
-          0.11084
+          0.00136,
+          0.00578
         ]
       },
       "hybrid_ndcg@10": {
-        "mean": 0.11345,
-        "std": 0.01055,
+        "mean": 0.00487,
+        "std": 0.00169,
         "ci_95": [
-          0.1042,
-          0.1229
+          0.00249,
+          0.00793
         ]
       },
       "hybrid_weak_coverage@5": {
-        "mean": 0.79213,
-        "std": 0.01889,
+        "mean": 0.95642,
+        "std": 0.00544,
         "ci_95": [
-          0.77408,
-          0.81006
+          0.94082,
+          0.97007
         ]
       },
       "hybrid_difficulty_fit@5": {
-        "mean": 0.92578,
-        "std": 0.0112,
+        "mean": 0.77884,
+        "std": 0.00993,
         "ci_95": [
-          0.91397,
-          0.93677
+          0.75918,
+          0.79865
         ]
       },
       "popularity_precision@5": {
-        "mean": 0.08869,
-        "std": 0.01196,
+        "mean": 0.07443,
+        "std": 0.00807,
         "ci_95": [
-          0.08,
-          0.09698
+          0.06531,
+          0.08401
         ]
       },
       "als_only_precision@5": {
-        "mean": 0.1059,
-        "std": 0.01309,
+        "mean": 0.08471,
+        "std": 0.0017,
         "ci_95": [
-          0.09654,
-          0.11508
+          0.07448,
+          0.0949
         ]
       },
       "hybrid_minus_popularity_p@5": {
-        "mean": 0.01319,
-        "std": 0.00374,
+        "mean": -0.07103,
+        "std": 0.00811,
         "ci_95": [
-          0.00581,
-          0.02078
+          -0.08062,
+          -0.0619
         ]
       },
       "hybrid_minus_als_only_p@5": {
-        "mean": -0.00401,
-        "std": 0.00354,
+        "mean": -0.0813,
+        "std": 0.00165,
         "ci_95": [
-          -0.00961,
-          0.00134
+          -0.09151,
+          -0.07109
         ]
       }
     }
@@ -1706,8 +1743,11 @@
     "xgboost": "3.4.0",
     "scikit_learn": "1.6.1",
     "torch": "2.13.0+cpu",
-    "numpy": "2.2.2",
-    "pandas": "2.2.3"
+    "numpy": "2.5.2",
+    "pandas": "3.0.5"
   },
-  "disclaimer": "This model was trained on a controlled synthetic multi-user population. Real-world generalization to live LeetCode contest ratings is benchmark evidence and has not been verified on real labeled multi-user contest datasets."
+  "disclaimer": "This model was trained on a controlled synthetic multi-user population. Real-world generalization to live LeetCode contest ratings is benchmark evidence and has not been verified on real labeled multi-user contest datasets.",
+  "evaluation_dataset": "synthetic_simulation_v3",
+  "evaluation_notice": "All evaluation metrics are computed on synthetic simulation data generated by Generator v3 with flatter Zipf popularity (0.35) and individualized Dirichlet topic preferences (beta=3.2).",
+  "results_summary": "slightly exceeds the popularity baseline overall (NDCG@5 0.0235 vs 0.0209) and ties it on long-tail (both 0%); Discovery Mode trades overall accuracy for tail coverage; all results are on synthetic data, real-user validation pending"
 }

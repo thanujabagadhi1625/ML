@@ -38,9 +38,9 @@ CONFIG_PROFILES = {
         "GENERATOR_VERSION": "v1",
     },
     "v3": {
-        "NUM_USERS": 2000,
-        "NUM_QUESTIONS": None,
-        "NUM_SUBMISSIONS": None,
+        "NUM_USERS": 5000,
+        "NUM_QUESTIONS": 2630,
+        "NUM_SUBMISSIONS": 350_000,
         "GENERATOR_VERSION": "v3",
         "BETA": 1.5,
         "P_RETRY": 0.35,
@@ -65,9 +65,9 @@ def set_profile(name: str):
 # --------------------------------------------------------------------------
 # Synthetic Data Generation & Archetypes (DATA ENGINE)
 # --------------------------------------------------------------------------
-NUM_USERS = 2000
-NUM_QUESTIONS = 453
-NUM_SUBMISSIONS = 30_000
+NUM_USERS = 5000
+NUM_QUESTIONS = 2630
+NUM_SUBMISSIONS = 350_000
 
 USER_ARCHETYPES = [
     "strong_overall",
@@ -128,16 +128,22 @@ TOP_KEYWORDS_PER_CLUSTER = 6
 # --------------------------------------------------------------------------
 # Recommendation Engine
 # --------------------------------------------------------------------------
-MF_LATENT_DIM = 16
-MF_REG_LAMBDA = 50.0            # ALS regularization (lambda * I)
+MF_LATENT_DIM = 24
+MF_REG_LAMBDA = 100.0            # ALS regularization (lambda * I)
 MF_CONFIDENCE_ALPHA = 5.0       # implicit-feedback confidence scaling
 MF_EPOCHS = 15
 TOP_N_RECOMMENDATIONS = 5
 
 # Recommendation score blending weights (tuned on validation users; see results/tuning.json and results/chosen_config.json)
-HYBRID_CF_WEIGHT = 1.0          # collaborative filtering weight
-HYBRID_CONTENT_WEIGHT = 0.0     # content similarity weight
-HYBRID_WEAKNESS_WEIGHT = 0.0    # topic weakness boost weight
+# Production hybrid blend (balanced collaborative filtering + content similarity + weakness boost)
+HYBRID_CF_WEIGHT = 0.50          # collaborative filtering weight
+HYBRID_CONTENT_WEIGHT = 0.25     # content similarity weight
+HYBRID_WEAKNESS_WEIGHT = 0.25    # topic weakness boost weight
+
+# Optional Discovery Mode (high long-tail exploration & semantic reinforcement)
+DISCOVERY_CF_WEIGHT = 0.00
+DISCOVERY_CONTENT_WEIGHT = 0.80
+DISCOVERY_WEAKNESS_WEIGHT = 0.20
 
 # --------------------------------------------------------------------------
 # Prediction Engine (contest rating regression)

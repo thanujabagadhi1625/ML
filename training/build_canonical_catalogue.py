@@ -92,10 +92,15 @@ EXPLICIT_TAG_MAP: Dict[str, str] = {
 
 def build_canonical_catalogue() -> list[dict]:
     if not CSV_PATH.exists():
-        raise FileNotFoundError(
-            f"Required catalogue dataset not found at '{CSV_PATH}'. "
-            "Please ensure data/leetcode_problems.csv exists before running."
-        )
+        print(f"Catalogue dataset not found at '{CSV_PATH}'. Attempting download...")
+        try:
+            import download_catalogue
+            download_catalogue.download()
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Required catalogue dataset not found at '{CSV_PATH}' and automatic download failed: {e}. "
+                "Please ensure data/leetcode_problems.csv exists before running."
+            )
 
     print(f"Reading {CSV_PATH} ...")
     raw_df = pd.read_csv(CSV_PATH)
@@ -191,6 +196,8 @@ def build_canonical_catalogue() -> list[dict]:
     catalogue_items.sort(key=lambda x: x["slug"])
     for qid, item in enumerate(catalogue_items, start=1):
         item["question_id"] = qid
+        item["id"] = qid
+        item["topics"] = list(item["topic_tags"])
 
     total_questions = len(catalogue_items)
     difficulty_counts = Counter(item["difficulty"] for item in catalogue_items)

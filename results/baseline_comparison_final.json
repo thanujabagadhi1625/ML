@@ -1,0 +1,32 @@
+{
+  "random": {
+    "hit@5": 0.0122,
+    "precision@5": 0.0024,
+    "recall@5": 0.0014,
+    "ndcg@5": 0.0022
+  },
+  "popularity": {
+    "hit@5": 0.3672,
+    "precision@5": 0.0878,
+    "recall@5": 0.0818,
+    "ndcg@5": 0.1117
+  },
+  "content_only": {
+    "hit@5": 0.0122,
+    "precision@5": 0.0027,
+    "recall@5": 0.0023,
+    "ndcg@5": 0.0027
+  },
+  "new_hybrid": {
+    "hit@5": 0.3618,
+    "precision@5": 0.0889,
+    "recall@5": 0.0781,
+    "ndcg@5": 0.1155
+  },
+  "old_model": {
+    "hit@5": 0.0899,
+    "precision@5": 0.018,
+    "recall@5": 0.0217,
+    "ndcg@5": 0.0219
+  }
+}

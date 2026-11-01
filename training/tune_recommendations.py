@@ -70,7 +70,7 @@ def min_max_norm(x: np.ndarray) -> np.ndarray:
 
 
 def run_tuning(
-    seeds: list[int] = [1, 2, 3],
+    seeds: list[int] = [1, 2],
     n_users: int = 2000,
     output_tuning_path: str | Path = ROOT_DIR / "results" / "tuning.json",
     output_chosen_path: str | Path = ROOT_DIR / "results" / "chosen_config.json",
@@ -130,6 +130,9 @@ def run_tuning(
         train_solved = train_s[train_s["status"] == "Accepted"]
         pop_counts = train_solved.groupby("question_id")["user_id"].nunique().to_dict()
         pop_ordered = sorted(all_qids, key=lambda q: (-pop_counts.get(q, 0), q))
+        n_head = max(1, int(round(0.20 * len(all_qids))))
+        head_qids = set(pop_ordered[:n_head])
+        tail_qids = set(all_qids) - head_qids
 
         eval_users = []
         for uid in sorted(val_u["user_id"].unique()):
@@ -174,6 +177,7 @@ def run_tuning(
                 "uid": uid,
                 "past_solved": past_s,
                 "gt_solved": gt,
+                "gt_tail": gt & tail_qids,
                 "cand_indices": cand_indices,
                 "cand_qids": cand_qids,
                 "content_norm": cnt_norm,
@@ -194,9 +198,9 @@ def run_tuning(
     # --------------------------------------------------------------------------
     # 2. Grid Search ALS Hyperparameters: factors x alpha x lambda
     # --------------------------------------------------------------------------
-    factor_candidates = [16, 24, 48]
-    alpha_candidates = [5.0, 15.0, 40.0]
-    lambda_candidates = [5.0, 20.0, 50.0]
+    factor_candidates = [16, 24, 32]
+    alpha_candidates = [5.0, 15.0, 30.0]
+    lambda_candidates = [20.0, 50.0, 100.0]
 
     als_grid = []
     best_als_ndcg = -1.0
@@ -220,7 +224,7 @@ def run_tuning(
                 reg_lambda=l,
                 n_epochs=15,
                 random_state=seed,
-            ).fit(data["train_interactions"])
+            ).fit(data["train_interactions"], all_item_ids=all_qids)
 
             item_ids = als.item_ids_ordered()
             item_id_to_idx = {qid: i for i, qid in enumerate(item_ids)}
@@ -280,7 +284,7 @@ def run_tuning(
             reg_lambda=best_als_params["reg_lambda"],
             n_epochs=15,
             random_state=seed,
-        ).fit(data["train_interactions"])
+        ).fit(data["train_interactions"], all_item_ids=all_qids)
         data["best_als"] = als
 
         item_ids = als.item_ids_ordered()
@@ -296,27 +300,30 @@ def run_tuning(
             u["cf_available"] = cf_available
             u["cf_norm"] = min_max_norm(cf_scores)
 
-    # Generate blend weight tuples summing to 1.0 in steps of 0.1
+    # Generate blend weight tuples summing to 1.0 in steps of 0.05
     weight_tuples = []
-    for i in range(11):
-        for j in range(11 - i):
-            k = 10 - i - j
-            weight_tuples.append((round(i / 10.0, 1), round(j / 10.0, 1), round(k / 10.0, 1)))
+    for i in range(21):
+        for j in range(21 - i):
+            k = 20 - i - j
+            w_cf, w_cnt, w_wk = round(i * 0.05, 2), round(j * 0.05, 2), round(k * 0.05, 2)
+            weight_tuples.append((w_cf, w_cnt, w_wk))
 
     if verbose:
-        print(f"Evaluating {len(weight_tuples)} blend weight combinations on validation users...", flush=True)
+        print(f"Evaluating {len(weight_tuples)} blend weight combinations on validation users (evaluating overall + long-tail)...", flush=True)
 
     weights_grid = []
-    best_weights_ndcg = -1.0
-    best_weights = None
 
     t0_weights = time.perf_counter()
     for w_cf, w_cnt, w_wk in weight_tuples:
-        seed_ndcgs = []
+        seed_overall_ndcgs = []
+        seed_tail_ndcgs = []
+        seed_tail_hits = []
 
         for seed in seeds:
             data = seed_data[seed]
             user_ndcgs = []
+            user_tail_ndcgs = []
+            user_tail_hits = []
 
             for u in data["eval_users"]:
                 cf_norm = u["cf_norm"]
@@ -344,42 +351,69 @@ def run_tuning(
                 topic_counts: dict[str, int] = {}
                 for qid in cands_sorted:
                     tag = qid_to_primary_tag.get(qid, "General")
-                    if topic_counts.get(tag, 0) >= 2 and len(selected) < 9:
+                    if topic_counts.get(tag, 0) >= 2 and len(selected) < 4:
                         continue
                     selected.append(qid)
                     topic_counts[tag] = topic_counts.get(tag, 0) + 1
-                    if len(selected) >= 10:
+                    if len(selected) >= 5:
                         break
 
-                if len(selected) < 10:
+                if len(selected) < 5:
                     for qid in cands_sorted:
                         if qid not in selected:
                             selected.append(qid)
-                            if len(selected) >= 10:
+                            if len(selected) >= 5:
                                 break
 
-                ndcg = compute_ndcg_at_k(selected, u["gt_solved"], k=10)
+                # Overall NDCG@5
+                ndcg = compute_ndcg_at_k(selected, u["gt_solved"], k=5)
                 user_ndcgs.append(ndcg)
 
-            seed_ndcgs.append(float(np.mean(user_ndcgs)) if user_ndcgs else 0.0)
+                # Long-tail NDCG@5 & Hit@5
+                gt_tail = u["gt_tail"]
+                if gt_tail:
+                    t_ndcg = compute_ndcg_at_k(selected, gt_tail, k=5)
+                    t_hit = 1.0 if any(q in gt_tail for q in selected[:5]) else 0.0
+                    user_tail_ndcgs.append(t_ndcg)
+                    user_tail_hits.append(t_hit)
 
-        mean_ndcg = float(np.mean(seed_ndcgs))
-        std_ndcg = float(np.std(seed_ndcgs, ddof=1)) if len(seed_ndcgs) > 1 else 0.0
+            seed_overall_ndcgs.append(float(np.mean(user_ndcgs)) if user_ndcgs else 0.0)
+            seed_tail_ndcgs.append(float(np.mean(user_tail_ndcgs)) if user_tail_ndcgs else 0.0)
+            seed_tail_hits.append(float(np.mean(user_tail_hits)) if user_tail_hits else 0.0)
+
+        mean_ndcg = float(np.mean(seed_overall_ndcgs))
+        std_ndcg = float(np.std(seed_overall_ndcgs, ddof=1)) if len(seed_overall_ndcgs) > 1 else 0.0
+        mean_tail_ndcg = float(np.mean(seed_tail_ndcgs)) if seed_tail_ndcgs else 0.0
+        mean_tail_hit = float(np.mean(seed_tail_hits)) if seed_tail_hits else 0.0
 
         grid_entry = {
             "weights": [w_cf, w_cnt, w_wk],
-            "val_ndcg@10_mean": round(mean_ndcg, 5),
-            "val_ndcg@10_std": round(std_ndcg, 5),
+            "val_ndcg@5_mean": round(mean_ndcg, 5),
+            "val_ndcg@5_std": round(std_ndcg, 5),
+            "val_tail_ndcg@5_mean": round(mean_tail_ndcg, 5),
+            "val_tail_hit@5_mean": round(mean_tail_hit, 5),
+            "is_constrained": bool(w_cnt >= 0.15 and w_wk >= 0.15),
         }
         weights_grid.append(grid_entry)
 
-        if mean_ndcg > best_weights_ndcg:
-            best_weights_ndcg = mean_ndcg
-            best_weights = [w_cf, w_cnt, w_wk]
+    # 1. Unconstrained winner (pure CF vs blend)
+    unconstrained_best = max(weights_grid, key=lambda x: x["val_ndcg@5_mean"])
+    # 2. Constrained winner: weakness_weight >= 0.15 and content_weight >= 0.15, optimizing long-tail NDCG
+    constrained_candidates = [x for x in weights_grid if x["is_constrained"]]
+    constrained_best = max(constrained_candidates, key=lambda x: (x["val_tail_ndcg@5_mean"], x["val_ndcg@5_mean"]))
+
+    # Use constrained winner for production
+    best_weights = constrained_best["weights"]
+    best_weights_ndcg = constrained_best["val_ndcg@5_mean"]
+    best_weights_tail_ndcg = constrained_best["val_tail_ndcg@5_mean"]
 
     print(f"Weights grid completed in {time.perf_counter() - t0_weights:.1f}s", flush=True)
     if verbose:
-        print(f"\nBest Blend Weights: CF={best_weights[0]}, Content={best_weights[1]}, Weakness={best_weights[2]} (val NDCG@10 = {best_weights_ndcg:.5f})", flush=True)
+        print("\n=== BLEND WEIGHT TUNING TRADEOFF SUMMARY ===", flush=True)
+        print(f"Unconstrained Best (overall): CF={unconstrained_best['weights'][0]}, Content={unconstrained_best['weights'][1]}, Weakness={unconstrained_best['weights'][2]}")
+        print(f"  -> Val Overall NDCG@5: {unconstrained_best['val_ndcg@5_mean']:.5f} | Val Long-Tail NDCG@5: {unconstrained_best['val_tail_ndcg@5_mean']:.5f}")
+        print(f"Constrained Production Best: CF={best_weights[0]}, Content={best_weights[1]}, Weakness={best_weights[2]}")
+        print(f"  -> Val Overall NDCG@5: {constrained_best['val_ndcg@5_mean']:.5f} | Val Long-Tail NDCG@5: {constrained_best['val_tail_ndcg@5_mean']:.5f} | Val Long-Tail Hit@5: {constrained_best['val_tail_hit@5_mean']:.5f}")
 
     # --------------------------------------------------------------------------
     # 4. Save results/tuning.json
@@ -394,14 +428,28 @@ def run_tuning(
         },
         "best_als_params": best_als_params,
         "best_als_ndcg@10": round(best_als_ndcg, 5),
+        "chosen_constrained_weights": {
+            "cf_weight": best_weights[0],
+            "content_weight": best_weights[1],
+            "weakness_weight": best_weights[2],
+            "val_ndcg@5": round(best_weights_ndcg, 5),
+            "val_tail_ndcg@5": round(best_weights_tail_ndcg, 5),
+        },
+        "unconstrained_best_weights": {
+            "cf_weight": unconstrained_best["weights"][0],
+            "content_weight": unconstrained_best["weights"][1],
+            "weakness_weight": unconstrained_best["weights"][2],
+            "val_ndcg@5": round(unconstrained_best["val_ndcg@5_mean"], 5),
+            "val_tail_ndcg@5": round(unconstrained_best["val_tail_ndcg@5_mean"], 5),
+        },
         "best_weights": {
             "cf_weight": best_weights[0],
             "content_weight": best_weights[1],
             "weakness_weight": best_weights[2],
         },
-        "best_weights_ndcg@10": round(best_weights_ndcg, 5),
+        "best_weights_ndcg@5": round(best_weights_ndcg, 5),
         "als_grid": sorted(als_grid, key=lambda x: -x["val_ndcg@10_mean"]),
-        "weights_grid": sorted(weights_grid, key=lambda x: -x["val_ndcg@10_mean"]),
+        "weights_grid": sorted(weights_grid, key=lambda x: (-x["val_tail_ndcg@5_mean"], -x["val_ndcg@5_mean"])),
     }
 
     Path(output_tuning_path).parent.mkdir(parents=True, exist_ok=True)
@@ -435,7 +483,8 @@ def run_tuning(
         },
         "validation_tuning_summary": {
             "val_ndcg@10_als_only": round(best_als_ndcg, 5),
-            "val_ndcg@10_hybrid": round(best_weights_ndcg, 5),
+            "val_ndcg@5_hybrid": round(best_weights_ndcg, 5),
+            "val_tail_ndcg@5_hybrid": round(best_weights_tail_ndcg, 5),
             "seeds_used": seeds,
             "split": "validation_users_only",
         },
@@ -460,4 +509,4 @@ def run_tuning(
 
 
 if __name__ == "__main__":
-    run_tuning(seeds=[1, 2, 3], n_users=2000, verbose=True)
+    run_tuning(seeds=[1, 2], n_users=2000, verbose=True)

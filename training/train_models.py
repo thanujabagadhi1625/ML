@@ -146,13 +146,16 @@ def train_and_evaluate():
     print(f"  Loaded {len(questions_df)} canonical questions.")
 
     # 2. Precompute Question Embeddings
-    print("\n[2/7] Precomputing question embeddings with sentence-transformers...")
-    analyzer = WeakTopicAnalyzer()
-    descriptions = questions_df["description"].fillna("").tolist()
-    embeddings = analyzer.embed_descriptions(descriptions)
-    config.QUESTION_EMBEDDINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.save(config.QUESTION_EMBEDDINGS_PATH, embeddings)
-    print(f"  Saved question embeddings to {config.QUESTION_EMBEDDINGS_PATH} (shape: {embeddings.shape})")
+    print("\n[2/7] Ensuring question embeddings with sentence-transformers...")
+    if config.QUESTION_EMBEDDINGS_PATH.exists() and len(np.load(config.QUESTION_EMBEDDINGS_PATH)) == len(questions_df):
+        print(f"  Existing embeddings found at {config.QUESTION_EMBEDDINGS_PATH}, reusing.")
+    else:
+        analyzer = WeakTopicAnalyzer()
+        descriptions = questions_df["description"].fillna("").tolist()
+        embeddings = analyzer.embed_descriptions(descriptions)
+        config.QUESTION_EMBEDDINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        np.save(config.QUESTION_EMBEDDINGS_PATH, embeddings)
+        print(f"  Saved question embeddings to {config.QUESTION_EMBEDDINGS_PATH} (shape: {embeddings.shape})")
 
     # 3. Controlled Synthetic Multi-User Population Generation
     print("\n[3/7] Generating synthetic multi-user population with realistic archetypes...")
@@ -161,8 +164,8 @@ def train_and_evaluate():
             questions_df=questions_df,
             n_users=config.NUM_USERS,
             random_seed=config.RANDOM_SEED,
-            zipf_exponent=0.8,
-            beta=1.5,
+            zipf_exponent=0.35,
+            beta=3.2,
         )
     else:
         users_df, latent_info = generate_synthetic_users(
@@ -219,13 +222,14 @@ def train_and_evaluate():
     # 7. Train & Evaluate ALS Recommender + Hybrid Blending
     print("\n[7/7] Training ALS Recommender & Evaluating Recommendation / Weak-Topic Systems...")
     train_interactions = build_interaction_matrix(train_subs)
+    all_catalogue_qids = questions_df["question_id"].tolist()
     als = ALSMatrixFactorization(
         n_factors=config.MF_LATENT_DIM,
         reg_lambda=config.MF_REG_LAMBDA,
         alpha=config.MF_CONFIDENCE_ALPHA,
         n_epochs=config.MF_EPOCHS,
         random_state=config.RANDOM_SEED,
-    ).fit(train_interactions)
+    ).fit(train_interactions, all_item_ids=all_catalogue_qids)
     als.save(config.ALS_MODEL_PATH)
     print(f"  Saved ALS model to {config.ALS_MODEL_PATH}")
 

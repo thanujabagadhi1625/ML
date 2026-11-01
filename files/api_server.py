@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Ensure both files/ and repo root are in sys.path whether executed from files/ or repo root
+FILES_DIR = Path(__file__).resolve().parent
+ROOT_DIR = FILES_DIR.parent
+if str(FILES_DIR) not in sys.path:
+    sys.path.insert(0, str(FILES_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(1, str(ROOT_DIR))
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware

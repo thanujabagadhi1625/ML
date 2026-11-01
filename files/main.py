@@ -206,8 +206,22 @@ class LeetCodeMentor:
         metrics = report.get("model_evaluation", {})
         print(f"RMSE={metrics.get('rmse')} | MAE={metrics.get('mae')} | R2={metrics.get('r2')}")
 
+    def set_recommendation_mode(self, mode: str = "default"):
+        """Sets hybrid weights: 'default' (balanced CF=0.5, Content=0.25, Weakness=0.25) or 'discovery' (CF=0.0, Content=0.8, Weakness=0.2)."""
+        if str(mode).lower() == "discovery":
+            self.recommender.cf_weight = getattr(config, "DISCOVERY_CF_WEIGHT", 0.0)
+            self.recommender.content_weight = getattr(config, "DISCOVERY_CONTENT_WEIGHT", 0.8)
+            self.recommender.weakness_weight = getattr(config, "DISCOVERY_WEAKNESS_WEIGHT", 0.2)
+        else:
+            self.recommender.cf_weight = getattr(config, "HYBRID_CF_WEIGHT", 0.50)
+            self.recommender.content_weight = getattr(config, "HYBRID_CONTENT_WEIGHT", 0.25)
+            self.recommender.weakness_weight = getattr(config, "HYBRID_WEAKNESS_WEIGHT", 0.25)
+
     def generate_report(self, user_id: int, provenance: Dict | None = None, **kwargs) -> Dict:
         from data_processing import calculate_data_diagnostics
+
+        if "recommendation_mode" in kwargs:
+            self.set_recommendation_mode(kwargs["recommendation_mode"])
 
         diagnostics = calculate_data_diagnostics(self.submissions_df, self.questions_df)
 

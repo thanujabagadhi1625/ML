@@ -146,6 +146,16 @@ else:  # Demo Dataset (Development / Testing Only)
 
 st.markdown("---")
 
+rec_mode_label = st.radio(
+    "Recommendation Mode",
+    [
+        "Balanced Hybrid (Production Default: CF=0.50, Content=0.25, Weakness=0.25)",
+        "Discovery Mode (High Long-Tail Exploration: CF=0.0, Content=0.80, Weakness=0.20)",
+    ],
+    help="Balanced mode provides competitive overall accuracy by blending collaborative filtering with weakness reinforcement. Discovery mode unlocks long-tail problems outside top head items."
+)
+chosen_rec_mode = "discovery" if "Discovery" in rec_mode_label else "default"
+
 if st.button("Generate Report", disabled=not can_generate):
     if not can_generate:
         st.error("Report generation is blocked: No valid real dataset is selected or available.")
@@ -167,8 +177,9 @@ if st.button("Generate Report", disabled=not can_generate):
             users_df, questions_df, submissions_df = load_leetcode_history_export(str(export_path))
 
         mentor = LeetCodeMentor(users_df, questions_df, submissions_df)
+        mentor.set_recommendation_mode(chosen_rec_mode)
         user_choice = int(mentor.users_df["user_id"].iloc[0])
-        report = mentor.generate_report(user_choice, provenance=data_provenance)
+        report = mentor.generate_report(user_choice, provenance=data_provenance, recommendation_mode=chosen_rec_mode)
         st.session_state["report"] = report
         st.success("Mentor report successfully generated!")
     except Exception as e:

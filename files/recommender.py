@@ -118,12 +118,17 @@ class ALSMatrixFactorization:
     def item_ids(self) -> list:
         return list(self.item_index_.keys()) if self.item_index_ is not None else []
 
-    def fit(self, interactions: pd.DataFrame, user_col="user_id", item_col="question_id", weight_col="weight"):
+    def fit(self, interactions: pd.DataFrame, user_col="user_id", item_col="question_id", weight_col="weight", all_item_ids: list | None = None):
         """
         Offline training on multi-user interaction dataset.
         """
         users = interactions[user_col].unique()
-        items = interactions[item_col].unique()
+        if all_item_ids is not None:
+            inter_items = interactions[item_col].unique().tolist()
+            combined_items = list(dict.fromkeys(list(all_item_ids) + inter_items))
+            items = np.array(combined_items)
+        else:
+            items = interactions[item_col].unique()
         self.user_index_ = {u: i for i, u in enumerate(users)}
         self.item_index_ = {it: i for i, it in enumerate(items)}
 
@@ -170,6 +175,12 @@ class ALSMatrixFactorization:
                 self.item_factors[i] = np.linalg.solve(A, b)
 
         self.YtY_ = self.item_factors.T @ self.item_factors
+        item_counts = np.diff(C.tocsc().indptr)
+        zero_inter_mask = (item_counts == 0)
+        if np.any(zero_inter_mask) and not np.all(zero_inter_mask):
+            mean_factor = np.mean(self.item_factors[~zero_inter_mask], axis=0)
+            self.item_factors[zero_inter_mask] = mean_factor
+            self.YtY_ = self.item_factors.T @ self.item_factors
         return self
 
     # ---- Serialization ----------------------------------------------------------
@@ -224,8 +235,13 @@ class ALSMatrixFactorization:
         """
         if isinstance(observed_items, pd.DataFrame):
             df = observed_items
-            qids = df["question_id"].tolist() if "question_id" in df.columns else []
-            weights = df["weight"].tolist() if "weight" in df.columns else [1.0] * len(qids)
+            if "weight" in df.columns:
+                qids = df["question_id"].tolist() if "question_id" in df.columns else []
+                weights = df["weight"].tolist()
+            else:
+                inter = build_interaction_matrix(df)
+                qids = inter["question_id"].tolist()
+                weights = inter["weight"].tolist()
             scores, _ = self._fold_in_user_core(qids, weights)
             return scores
 
@@ -244,7 +260,7 @@ class ALSMatrixFactorization:
             if qid in self.item_index_:
                 idx = self.item_index_[qid]
                 w = observed_weights[i] if observed_weights and i < len(observed_weights) else 1.0
-                unique_interactions[idx] = unique_interactions.get(idx, 0.0) + w
+                unique_interactions[idx] = max(unique_interactions.get(idx, 0.0), w)
 
         # Cold-start guard: require at least 3 unique valid interactions for meaningful collaborative latent vector
         if len(unique_interactions) < 3:
@@ -309,21 +325,44 @@ def build_interaction_matrix(submissions_df: pd.DataFrame) -> pd.DataFrame:
 # ==============================================================================
 
 class ContentBasedRecommender:
-    """Topic-tag based cosine similarity matching candidate questions to user history."""
+    """Topic-tag and semantic embedding based similarity matching candidate questions to user history."""
 
-    def __init__(self, questions_df: pd.DataFrame):
+    def __init__(self, questions_df: pd.DataFrame, embeddings_path: Path | None = None):
         self.questions_df = questions_df.reset_index(drop=True)
         all_tags = sorted({tag for tags in self.questions_df["topic_tags"] for tag in tags if tag})
         self.tag_index = {tag: i for i, tag in enumerate(all_tags)}
         n_tags = max(len(all_tags), 1)
-        self.tag_matrix = np.zeros((len(self.questions_df), n_tags), dtype=float)
 
+        # Compute document frequency and IDF for tags to avoid common container tags dominating
+        tag_doc_freq = {t: 0 for t in all_tags}
+        for tags in self.questions_df["topic_tags"]:
+            for t in tags:
+                if t in tag_doc_freq:
+                    tag_doc_freq[t] += 1
+        n_q = len(self.questions_df)
+        self.tag_idf = {t: float(np.log((n_q + 1.0) / (tag_doc_freq[t] + 1.0)) + 1.0) for t in all_tags}
+
+        self.tag_matrix = np.zeros((n_q, n_tags), dtype=float)
         for row_idx, tags in enumerate(self.questions_df["topic_tags"]):
             for tag in tags:
                 if tag in self.tag_index:
-                    self.tag_matrix[row_idx, self.tag_index[tag]] = 1.0
+                    self.tag_matrix[row_idx, self.tag_index[tag]] = self.tag_idf[tag]
 
+        row_norms = np.linalg.norm(self.tag_matrix, axis=1, keepdims=True)
+        self.tag_matrix = self.tag_matrix / np.maximum(row_norms, 1e-12)
         self.qid_to_row = {qid: i for i, qid in enumerate(self.questions_df["question_id"])}
+
+        # Optional precomputed continuous semantic embeddings
+        self.embeddings = None
+        emb_path = embeddings_path or config.QUESTION_EMBEDDINGS_PATH
+        if emb_path and Path(emb_path).exists():
+            try:
+                emb = np.load(emb_path)
+                if len(emb) == len(self.questions_df):
+                    e_norms = np.linalg.norm(emb, axis=1, keepdims=True)
+                    self.embeddings = emb / np.maximum(e_norms, 1e-12)
+            except Exception:
+                self.embeddings = None
 
     def _question_tag_vector(self, question_id: int) -> np.ndarray:
         row = self.qid_to_row.get(question_id)
@@ -349,13 +388,29 @@ class ContentBasedRecommender:
         if not np.any(profile):
             return np.zeros(len(self.questions_df))
 
-        q_norms = np.linalg.norm(self.tag_matrix, axis=1)
         profile_norm = np.linalg.norm(profile)
         if profile_norm < 1e-12:
             return np.zeros(len(self.questions_df))
 
-        scores = (self.tag_matrix @ profile) / (q_norms * profile_norm + 1e-12)
-        return np.clip(scores, 0.0, 1.0)
+        tag_scores = np.clip(self.tag_matrix @ profile / profile_norm, 0.0, 1.0)
+
+        # Continuous semantic embedding similarity if available
+        if self.embeddings is not None and (solved_question_ids or failed_question_ids):
+            s_rows = [self.qid_to_row[q] for q in solved_question_ids if q in self.qid_to_row]
+            f_rows = [self.qid_to_row[q] for q in (failed_question_ids or []) if q in self.qid_to_row]
+            if s_rows or f_rows:
+                e_prof = np.zeros(self.embeddings.shape[1], dtype=float)
+                if s_rows:
+                    e_prof += self.embeddings[s_rows].sum(axis=0)
+                if f_rows:
+                    e_prof += 0.5 * self.embeddings[f_rows].sum(axis=0)
+                e_norm = np.linalg.norm(e_prof)
+                if e_norm > 1e-12:
+                    e_prof /= e_norm
+                    emb_sim = np.clip((self.embeddings @ e_prof + 1.0) / 2.0, 0.0, 1.0)
+                    return 0.5 * tag_scores + 0.5 * emb_sim
+
+        return tag_scores
 
 
 # ==============================================================================
@@ -790,11 +845,22 @@ class HybridRecommender:
 
         if not popular_df.empty:
             popular_df = popular_df.copy()
+            cf_avail = False
+            if self.als is not None and self.als.is_fitted:
+                subs_to_check = user_submissions_df if user_submissions_df is not None else self.submissions_df
+                u_subs = subs_to_check[subs_to_check["user_id"] == user_id] if not subs_to_check.empty else pd.DataFrame()
+                if not u_subs.empty:
+                    valid_q = [q for q in u_subs["question_id"].unique() if q in self.als.item_index_]
+                    if len(valid_q) >= 3:
+                        cf_avail = True
+
             def _popular_reason(row):
                 diff = row.get("difficulty", "Medium")
                 tags = row.get("topic_tags", [])
                 tag_str = f" in {', '.join(tags[:2])}" if tags else ""
-                return f"Collaborative filtering candidate ({diff} problem{tag_str}) aligning with peer learning paths."
+                if cf_avail:
+                    return f"Collaborative filtering candidate ({diff} problem{tag_str}) aligning with peer learning paths."
+                return f"Curated algorithmic candidate ({diff} problem{tag_str}) recommended for practice."
 
             popular_df["reason"] = popular_df.apply(_popular_reason, axis=1)
             if "leetcode_id" in popular_df.columns:

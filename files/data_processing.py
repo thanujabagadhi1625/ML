@@ -225,7 +225,7 @@ def generate_synthetic_users(
 def generate_synthetic_submissions(
     users_df: pd.DataFrame,
     questions_df: pd.DataFrame,
-    n_submissions: int = config.NUM_SUBMISSIONS,
+    n_submissions: int = 30_000,
     random_seed: int = config.RANDOM_SEED,
     latent_users_info: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
@@ -460,11 +460,11 @@ def temporal_split_user_submissions(
     return history_df, future_df
 
 
-def generate_full_synthetic_dataset():
+def generate_full_synthetic_dataset(n_users: int = 100, n_submissions: int = 2000):
     """Convenience entry point returning (users_df, questions_df, submissions_df)."""
-    questions_df = generate_synthetic_questions()
-    users_df, latent_info = generate_synthetic_users(return_latent_info=True)
-    submissions_df = generate_synthetic_submissions(users_df, questions_df, latent_users_info=latent_info)
+    questions_df = generate_synthetic_questions(n=min(config.NUM_QUESTIONS, 100))
+    users_df, latent_info = generate_synthetic_users(n=n_users, return_latent_info=True)
+    submissions_df = generate_synthetic_submissions(users_df, questions_df, n_submissions=n_submissions, latent_users_info=latent_info)
     return users_df, questions_df, submissions_df
 
 def _parse_topic_tags(value: Any) -> list[str]:
@@ -690,6 +690,17 @@ def _normalize_export_submissions(raw_df: pd.DataFrame) -> pd.DataFrame:
         else:
             sub["title"] = sub["question_id"].astype(str)
 
+    if "slug" not in sub.columns:
+        if "question_slug" in sub.columns:
+            sub["slug"] = sub["question_slug"]
+        elif "problem_slug" in sub.columns:
+            sub["slug"] = sub["problem_slug"]
+        elif "title" in sub.columns:
+            sub["slug"] = sub["title"].astype(str).str.lower().str.replace(r"[^\w\s-]", "", regex=True).str.strip().str.replace(r"\s+", "-", regex=True)
+        else:
+            sub["slug"] = sub["question_id"].astype(str).str.lower().str.replace(r"[^\w\s-]", "", regex=True).str.strip().str.replace(r"\s+", "-", regex=True)
+    sub["slug"] = sub["slug"].astype(str).str.lower().str.strip()
+
     if "difficulty" not in sub.columns:
         if "question_difficulty" in sub.columns:
             sub["difficulty"] = sub["question_difficulty"]
@@ -741,7 +752,7 @@ def _normalize_export_submissions(raw_df: pd.DataFrame) -> pd.DataFrame:
         elif "tags" in sub.columns:
             sub["topic_tags"] = sub["tags"]
         else:
-            sub["topic_tags"] = []
+            sub["topic_tags"] = [[] for _ in range(len(sub))]
 
     sub["topic_tags"] = sub["topic_tags"].apply(_parse_topic_tags)
 
@@ -784,7 +795,7 @@ def _normalize_export_submissions(raw_df: pd.DataFrame) -> pd.DataFrame:
     sub = sub.dropna(subset=["question_id", "status", "timestamp"])
 
     return sub[
-        ["user_id", "question_id", "timestamp", "status", "runtime_ms", "language", "title", "difficulty", "topic_tags", "acceptance_rate"]
+        ["user_id", "question_id", "timestamp", "status", "runtime_ms", "language", "title", "difficulty", "topic_tags", "acceptance_rate", "slug"]
     ]
 
 
@@ -799,9 +810,16 @@ def _build_questions_from_export(submissions_df: pd.DataFrame) -> tuple[pd.DataF
     canonical_df = load_canonical_questions()
     canonical_slug_to_id = {}
     canonical_title_to_id = {}
+    canonical_lid_to_id = {}
     if "slug" in canonical_df.columns:
         canonical_slug_to_id = dict(zip(canonical_df["slug"].astype(str).str.lower(), canonical_df["question_id"]))
     canonical_title_to_id = dict(zip(canonical_df["title"].astype(str).str.lower(), canonical_df["question_id"]))
+    if "leetcode_id" in canonical_df.columns:
+        canonical_lid_to_id = {
+            str(lid).strip(): qid
+            for lid, qid in zip(canonical_df["leetcode_id"], canonical_df["question_id"])
+            if pd.notna(lid)
+        }
 
     max_canonical_id = int(canonical_df["question_id"].max()) if not canonical_df.empty else 0
 
@@ -825,6 +843,8 @@ def _build_questions_from_export(submissions_df: pd.DataFrame) -> tuple[pd.DataF
             matched_id = canonical_slug_to_id[key_str]
         elif title_str in canonical_title_to_id:
             matched_id = canonical_title_to_id[title_str]
+        elif key_str in canonical_lid_to_id:
+            matched_id = canonical_lid_to_id[key_str]
         elif key_str.isdigit() and int(key_str) in set(canonical_df["question_id"]):
             matched_id = int(key_str)
 
@@ -895,7 +915,6 @@ def load_leetcode_history_export(export_path: str | Path) -> tuple[pd.DataFrame,
     user_id_map = {old_id: idx + 1 for idx, old_id in enumerate(sorted(unique_user_ids))}
     submissions_df["user_id"] = submissions_df["user_id"].map(user_id_map)
     users_df = _build_users_from_export(submissions_df)
-    users_df["user_id"] = users_df["user_id"].map(user_id_map)
 
     desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
     q_cols = [c for c in desired if c in questions_df.columns]
@@ -916,7 +935,6 @@ def load_leetcode_history_records(records: list[dict]) -> tuple[pd.DataFrame, pd
     user_id_map = {old_id: idx + 1 for idx, old_id in enumerate(sorted(unique_user_ids))}
     submissions_df["user_id"] = submissions_df["user_id"].map(user_id_map)
     users_df = _build_users_from_export(submissions_df)
-    users_df["user_id"] = users_df["user_id"].map(user_id_map)
 
     desired = ["question_id", "leetcode_id", "slug", "title", "description", "difficulty", "topic_tags", "acceptance_rate"]
     q_cols = [c for c in desired if c in questions_df.columns]
@@ -953,13 +971,18 @@ class FeatureEngineer:
     def __init__(self, users_df: pd.DataFrame, questions_df: pd.DataFrame, submissions_df: pd.DataFrame):
         self.users_df = users_df
         self.questions_df = questions_df
-        # Drop columns from submissions_df that will be merged from questions_df to avoid _x/_y suffix collision
-        overlap_cols = [c for c in ["difficulty", "topic_tags", "acceptance_rate", "title", "description"] if c in submissions_df.columns]
-        cleaned_submissions = submissions_df.drop(columns=overlap_cols) if overlap_cols else submissions_df
-        self.submissions_df = cleaned_submissions.merge(
+        # Merge questions_df while preserving submission metadata if not found in questions_df
+        merged = submissions_df.merge(
             questions_df[["question_id", "difficulty", "topic_tags", "acceptance_rate"]],
-            on="question_id", how="left",
+            on="question_id", how="left", suffixes=("_sub", ""),
         )
+        for col in ["difficulty", "topic_tags", "acceptance_rate"]:
+            if f"{col}_sub" in merged.columns:
+                merged[col] = merged[col].combine_first(merged[f"{col}_sub"])
+                merged = merged.drop(columns=[f"{col}_sub"])
+        merged["difficulty"] = merged["difficulty"].fillna("Medium")
+        merged["acceptance_rate"] = merged["acceptance_rate"].fillna(0.5)
+        self.submissions_df = merged
 
     # ---- 2a. Accuracy ratios -------------------------------------------------
     def compute_accuracy_ratios(self) -> pd.DataFrame:
@@ -1027,8 +1050,8 @@ class FeatureEngineer:
         if sub.empty:
             return pd.DataFrame(columns=cols, index=pd.Index([], name="user_id"))
 
-        now = sub["timestamp"].max()
-        days_ago = (now - sub["timestamp"]).dt.total_seconds() / 86400.0
+        user_now = sub.groupby("user_id")["timestamp"].transform("max")
+        days_ago = (user_now - sub["timestamp"]).dt.total_seconds() / 86400.0
         decay_lambda = np.log(2.0) / half_life_days
         weight = np.exp(-decay_lambda * days_ago)
 
@@ -1202,8 +1225,8 @@ def compute_user_topic_profile(
 
     # Time-decay weight for recency (21-day half life)
     if "timestamp" in sub_tags.columns and pd.api.types.is_datetime64_any_dtype(sub_tags["timestamp"]) and not sub_tags["timestamp"].isna().all():
-        now = sub_tags["timestamp"].max()
-        days_ago = (now - sub_tags["timestamp"]).dt.total_seconds() / 86400.0
+        user_now = sub_tags.groupby("user_id")["timestamp"].transform("max") if "user_id" in sub_tags.columns else sub_tags["timestamp"].max()
+        days_ago = (user_now - sub_tags["timestamp"]).dt.total_seconds() / 86400.0
         sub_tags["_weight"] = np.power(0.5, days_ago / 21.0)
         sub_tags["_is_recent"] = days_ago <= 42.0  # 2x half-life window (same as compute_recency_momentum)
     else:
@@ -1351,7 +1374,7 @@ Generative Simulator v3 Assumptions & Architecture:
 
 
 def generate_synthetic_users_v3(
-    n: int = 2000,
+    n: int = config.NUM_USERS,
     random_seed: int = config.RANDOM_SEED,
     return_latent_info: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
@@ -1387,7 +1410,10 @@ def generate_synthetic_users_v3(
     topic_interests = np.zeros((n, n_tags), dtype=float)
 
     for i, arch in enumerate(archetypes):
-        alpha = archetype_alphas[arch]
+        alpha = archetype_alphas[arch].copy()
+        # Add individualized focus topics so users have authentic personal preferences
+        user_favs = rng.choice(n_tags, size=2, replace=False)
+        alpha[user_favs] += [6.0, 3.5]
         topic_interests[i] = rng.dirichlet(alpha)
 
         # Individual skill noise
@@ -1464,12 +1490,12 @@ def generate_synthetic_submissions_v3(
     questions_df: pd.DataFrame,
     random_seed: int = config.RANDOM_SEED,
     latent_users_info: pd.DataFrame | None = None,
-    zipf_exponent: float = 0.8,
-    beta: float = 1.5,
+    zipf_exponent: float = 0.35,
+    beta: float = 3.2,
     p_retry: float = 0.35,
-    mean_submissions: float = 100.0,
+    mean_submissions: float = 72.0,
     min_submissions: int = 20,
-    lognormal_sigma: float = 0.55,
+    lognormal_sigma: float = 0.50,
     ref_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     rng = _rng(random_seed)
@@ -1496,6 +1522,22 @@ def generate_synthetic_submissions_v3(
             if t in tag_to_idx:
                 T_tags[j, tag_to_idx[t]] = 1.0
 
+    # Catalogue document frequency for tag specificity (prevents common container tags like Array from dominating)
+    tag_doc_freq = {}
+    for tags in questions_df["topic_tags"]:
+        for t in tags:
+            tag_doc_freq[t] = tag_doc_freq.get(t, 0) + 1
+
+    # Primary topic index per question: choose most specific (least frequent) tag
+    q_primary_topic = np.zeros(n_questions, dtype=int)
+    for j, tags in enumerate(questions_df["topic_tags"]):
+        valid_tags = [t for t in tags if t in tag_to_idx]
+        if valid_tags:
+            best_t = sorted(valid_tags, key=lambda t: tag_doc_freq.get(t, 99999))[0]
+            q_primary_topic[j] = tag_to_idx[best_t]
+        else:
+            q_primary_topic[j] = 0
+
     # Universal long-tailed question popularity (Zipf distribution) fixed by seed
     pop_rng = np.random.default_rng(random_seed + 777)
     ranks = np.arange(1, n_questions + 1)
@@ -1513,7 +1555,7 @@ def generate_synthetic_submissions_v3(
         _, lat_df = generate_synthetic_users_v3(n=n_users, random_seed=random_seed, return_latent_info=True)
         latent_dict = lat_df.set_index("user_id").to_dict(orient="index")
 
-    # Lognormal heavy-tailed submissions per user
+    # Lognormal heavy-tailed submissions per user (mean ~72 across 5000 users -> 350k+ events)
     mu = np.log(mean_submissions) - 0.5 * (lognormal_sigma ** 2)
     user_n_subs = np.maximum(
         min_submissions,
@@ -1554,25 +1596,59 @@ def generate_synthetic_submissions_v3(
         rel_sec = (cum_deltas / cum_deltas[-1]) * span_sec
         u_ts = start_date + pd.to_timedelta(rel_sec, unit="s")
 
+        # Track prerequisite progress per topic (Easy -> Medium -> Hard)
+        solved_in_topic_easy = np.zeros(n_tags, dtype=int)
+        solved_in_topic_med = np.zeros(n_tags, dtype=int)
+
         prev_qid = -1
         prev_j = -1
         prev_status = None
+        prev_topic = -1
 
         for k in range(M_u):
             elapsed_days = rel_sec[k] / 86400.0
             current_skill = base_skill + slope * elapsed_days
 
-            # Question choice
+            # Question choice: retry on failure with probability p_retry
             if k > 0 and prev_status != "Accepted" and rng.random() < p_retry:
                 q_k = prev_qid
                 j_k = prev_j
             else:
                 # Difficulty fit favors problems slightly above user's current skill
                 s_star = current_skill + 0.35
-                me = np.exp(-((-1.2 - s_star) ** 2) / 1.28)
-                mm = np.exp(-((0.0 - s_star) ** 2) / 1.28)
-                mh = np.exp(-((1.4 - s_star) ** 2) / 1.28)
+                me = np.exp(-((-1.2 - s_star) ** 2) / 0.85)
+                mm = np.exp(-((0.0 - s_star) ** 2) / 0.85)
+                mh = np.exp(-((1.4 - s_star) ** 2) / 0.85)
                 W_k = base_q_mass * np.where(easy_mask, me, np.where(med_mask, mm, mh))
+
+                # Session co-solve clustering: user works on the active topic with 65% probability
+                if prev_topic >= 0 and rng.random() < 0.65:
+                    same_topic_mask = (q_primary_topic == prev_topic)
+                    t_se = solved_in_topic_easy[prev_topic]
+                    t_sm = solved_in_topic_med[prev_topic]
+                    prereq_mult = np.ones(n_questions, dtype=float)
+                    if t_se < 1:
+                        # Must solve Easy first in this topic
+                        prereq_mult[same_topic_mask & hard_mask] *= 0.05
+                        prereq_mult[same_topic_mask & med_mask] *= 0.25
+                        prereq_mult[same_topic_mask & easy_mask] *= 3.0
+                    elif t_sm < 2:
+                        # Progressing to Medium in this topic
+                        prereq_mult[same_topic_mask & hard_mask] *= 0.20
+                        prereq_mult[same_topic_mask & med_mask] *= 2.5
+                        prereq_mult[same_topic_mask & easy_mask] *= 0.6
+                    else:
+                        # Advanced in this topic: Hard problems unlocked
+                        prereq_mult[same_topic_mask & hard_mask] *= 2.5
+                        prereq_mult[same_topic_mask & med_mask] *= 1.2
+                        prereq_mult[same_topic_mask & easy_mask] *= 0.3
+
+                    W_k = W_k * np.where(same_topic_mask, 2.5 * prereq_mult, 1.0)
+
+                # 10% global exploration noise
+                if rng.random() < 0.10:
+                    W_k += 0.20 * pop_weights
+
                 W_sum = W_k.sum()
                 if W_sum <= 0:
                     p_k = np.ones(n_questions) / n_questions
@@ -1583,17 +1659,25 @@ def generate_synthetic_submissions_v3(
                 if j_k >= n_questions:
                     j_k = n_questions - 1
                 q_k = question_ids[j_k]
+                prev_topic = q_primary_topic[j_k]
 
-            # Solve probability (IRT formula)
+            # Solve probability (IRT formula with prerequisite mastery boost)
             q_diff = d_q[j_k]
             eff_diff = q_diff - (hard_res if q_diff >= 3.0 else 0.0)
-            topic_eff = (tag_match[j_k] - 0.05) * 2.0
-            logit = 1.4 * (current_skill + topic_eff - (eff_diff - 2.2))
+            topic_idx = q_primary_topic[j_k]
+            topic_eff = (theta_u[topic_idx] - 0.05) * 2.0
+            prereq_bonus = 0.25 if (q_diff > 1.5 and solved_in_topic_easy[topic_idx] >= 1) else 0.0
+            logit = 1.4 * (current_skill + topic_eff + prereq_bonus - (eff_diff - 2.2))
             prob = 1.0 / (1.0 + np.exp(-np.clip(logit, -10.0, 10.0)))
             prob = np.clip(prob, 0.02, 0.98)
 
             is_accepted = (rng.random() < prob)
             status_k = "Accepted" if is_accepted else rng.choice(fail_statuses, p=fail_weights)
+            if is_accepted:
+                if q_diff <= 1.5:
+                    solved_in_topic_easy[topic_idx] += 1
+                elif q_diff < 3.0:
+                    solved_in_topic_med[topic_idx] += 1
 
             all_user_ids.append(uid)
             all_q_ids.append(q_k)
@@ -1620,12 +1704,12 @@ def generate_synthetic_submissions_v3(
 
 def generate_synthetic_dataset_v3(
     questions_df: pd.DataFrame | None = None,
-    n_users: int = 2000,
+    n_users: int = config.NUM_USERS,
     random_seed: int = config.RANDOM_SEED,
-    zipf_exponent: float = 0.8,
-    beta: float = 1.5,
+    zipf_exponent: float = 0.35,
+    beta: float = 3.2,
     p_retry: float = 0.35,
-    mean_submissions: float = 100.0,
+    mean_submissions: float = 72.0,
     min_submissions: int = 20,
     ref_date: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:

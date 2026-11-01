@@ -1,89 +1,89 @@
 {
   "chosen_als_params": {
-    "n_factors": 16,
+    "n_factors": 24,
     "alpha": 5.0,
-    "reg_lambda": 50.0,
+    "reg_lambda": 100.0,
     "n_epochs": 15
   },
   "chosen_hybrid_weights": {
-    "cf_weight": 1.0,
-    "content_weight": 0.0,
-    "weakness_weight": 0.0
+    "cf_weight": 0.0,
+    "content_weight": 0.8,
+    "weakness_weight": 0.2
   },
   "validation_tuning_summary": {
-    "val_ndcg@10_als_only": 0.12147,
-    "val_ndcg@10_hybrid": 0.10745,
+    "val_ndcg@10_als_only": 0.03122,
+    "val_ndcg@5_hybrid": 0.00547,
+    "val_tail_ndcg@5_hybrid": 0.00395,
     "seeds_used": [
       1,
-      2,
-      3
+      2
     ],
     "split": "validation_users_only"
   },
   "test_evaluation_summary": {
-    "evaluated_users_total": 895,
+    "evaluated_users_total": 588,
     "hybrid_precision@5": {
-      "mean": 0.10188,
-      "std": 0.01141,
+      "mean": 0.0034,
+      "std": 5e-05,
       "ci_95": [
-        0.09274,
-        0.11084
+        0.00136,
+        0.00578
       ]
     },
     "hybrid_ndcg@10": {
-      "mean": 0.11345,
-      "std": 0.01055,
+      "mean": 0.00487,
+      "std": 0.00169,
       "ci_95": [
-        0.1042,
-        0.1229
+        0.00249,
+        0.00793
       ]
     },
     "hybrid_weak_coverage@5": {
-      "mean": 0.79213,
-      "std": 0.01889,
+      "mean": 0.95642,
+      "std": 0.00544,
       "ci_95": [
-        0.77408,
-        0.81006
+        0.94082,
+        0.97007
       ]
     },
     "hybrid_difficulty_fit@5": {
-      "mean": 0.92578,
-      "std": 0.0112,
+      "mean": 0.77884,
+      "std": 0.00993,
       "ci_95": [
-        0.91397,
-        0.93677
+        0.75918,
+        0.79865
       ]
     },
     "popularity_precision@5": {
-      "mean": 0.08869,
-      "std": 0.01196,
+      "mean": 0.07443,
+      "std": 0.00807,
       "ci_95": [
-        0.08,
-        0.09698
+        0.06531,
+        0.08401
       ]
     },
     "als_only_precision@5": {
-      "mean": 0.1059,
-      "std": 0.01309,
+      "mean": 0.08471,
+      "std": 0.0017,
       "ci_95": [
-        0.09654,
-        0.11508
+        0.07448,
+        0.0949
       ]
     },
     "hybrid_minus_popularity_p@5": {
-      "mean": 0.01319,
-      "std": 0.00374,
+      "mean": -0.07103,
+      "std": 0.00811,
       "ci_95": [
-        0.00581,
-        0.02078
+        -0.08062,
+        -0.0619
       ]
     },
     "hybrid_minus_als_only_p@5": {
-      "mean": -0.00401,
-      "std": 0.00354,
+      "mean": -0.0813,
+      "std": 0.00165,
       "ci_95": [
-        -0.00961,
-        0.00134
+        -0.09151,
+        -0.07109
       ]
     }
   }

@@ -248,7 +248,7 @@ def run_benchmark(
             alpha=als_params["alpha"],
             n_epochs=als_params["n_epochs"],
             random_state=seed,
-        ).fit(train_interactions)
+        ).fit(train_interactions, all_item_ids=all_qids)
         t_als = time.perf_counter() - t_start
         als_training_times.append(t_als)
 
